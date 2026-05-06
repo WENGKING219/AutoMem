@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Memory dump files (too large for git)
+memory_dumps/*
+!memory_dumps/.gitkeep
+
+# Reports (generated)
+reports/*
+!reports/.gitkeep
+
+# Logs
+logs/*
+!logs/.gitkeep
+
+# Environment
+.env
+.env.local
+
+# Local runtimes and caches
+.uv-cache/
+.uv-python/
+.tmp/
+.playwright-mcp/
+test-results/
+windows.zip
+PATCH_NOTES.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# UV
+.python-version
+
+# Docker
+volatility_mcp_server/symbol_tables/

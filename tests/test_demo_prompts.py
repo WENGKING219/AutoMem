@@ -1,0 +1,31 @@
+from pathlib import Path
+
+
+def test_quick_actions_are_small_and_demo_safe():
+    frontend_source = Path("frontend/app.py").read_text(encoding="utf-8")
+
+    for label in [
+        "Initial Triage",
+        "Hidden Process",
+        "Network",
+        "Credential Hashes",
+        "Generate Report",
+    ]:
+        assert f'label="{label}"' in frontend_source or f'label = "{label}"' in frontend_source
+
+    combined = frontend_source.lower()
+    assert "query_plugin_rows" in combined
+    assert "run_hashdump" in combined
+    assert "hash_evidence" in combined
+    assert "use at most 8 volatility calls" in combined
+    assert "do not skip any" not in combined
+    assert "run all" not in combined
+    assert "def build_quick_actions" in frontend_source
+    assert "is_report=True" in frontend_source
+
+
+def test_frontend_uses_local_quick_action_builder():
+    frontend_source = Path("frontend/app.py").read_text(encoding="utf-8")
+
+    assert "agent.demo_prompts" not in frontend_source
+    assert "actions = build_quick_actions(dump_name)" in frontend_source

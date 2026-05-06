@@ -1,0 +1,20 @@
+# AutoMem - Streamlit theme.
+# Theming via config.toml is preferred over inline CSS because it applies
+# uniformly to all native widgets (buttons, badges, inputs, expanders).
+# Docs: https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+
+[theme]
+base = "dark"
+primaryColor = "#7C5CFF"             # AutoMem violet (matches logo gradient)
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#161B22"
+textColor = "#E6E9EF"
+font = "sans serif"
+
+[server]
+# Memory dumps are often larger than Streamlit's default upload limit.
+# Value is in megabytes.
+maxUploadSize = 8192
+
+[browser]
+gatherUsageStats = false
