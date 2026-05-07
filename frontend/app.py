@@ -213,6 +213,7 @@ TOOL_LABELS = {
     "run_handles": "Listing open handles (handles)",
     "run_svcscan": "Checking Windows services (svcscan)",
     "run_psxview": "Cross-checking hidden processes (psxview)",
+    "run_amcache": "Reading Amcache execution evidence (amcache)",
     "hash_evidence": "Hashing suspicious evidence values",
     "compact_conversation": "Compacting conversation context",
     "save_report": "Saving report to disk",

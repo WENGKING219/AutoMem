@@ -21,7 +21,7 @@ The Volatility MCP server runs as an HTTP service at `http://localhost:8000/mcp`
 - FastMCP wrapper around common Volatility3 Windows plugins.
 - Dockerized Volatility backend with a persistent cache volume.
 - Result caching and row filtering through `query_plugin_rows` for large plugin output.
-- Demo-focused quick actions for triage, hidden process checks, network review, credential hash checks, and report generation.
+- Demo-focused quick actions for triage, hidden process checks, network review, and report generation.
 - Markdown report generation with evidence hashing for exact indicators.
 - Pytest coverage for MCP contracts, helper behavior, cache handling, prompt safety, and response quality.
 
@@ -170,7 +170,7 @@ docker compose up -d --build
 | `run_dlllist` | Loaded DLL/module review for targeted PIDs |
 | `run_handles` | File, registry, and mutex handles for targeted PIDs |
 | `run_svcscan` | Windows service review |
-| `run_hashdump` | LM/NTLM credential hash extraction when explicitly requested |
+| `run_amcache` | Amcache execution evidence (paths + SHA1 file hashes; Windows 7+; large output, drill in with `query_plugin_rows` on Path / SHA1Hash) |
 | `hash_evidence` | MD5/SHA1/SHA256 hashing for exact indicator strings |
 | `query_plugin_rows` | Cached row filtering for focused drill-downs |
 

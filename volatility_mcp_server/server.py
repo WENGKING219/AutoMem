@@ -48,7 +48,7 @@ AVAILABLE_PLUGIN_NAMES = {
     "dlllist": "windows.dlllist.DllList",
     "handles": "windows.handles.Handles",
     "svcscan": "windows.svcscan.SvcScan",
-    "hashdump": "windows.hashdump.Hashdump",
+    "amcache": "windows.registry.amcache.Amcache",
 }
 
 
@@ -366,7 +366,7 @@ async def query_plugin_rows(
 
     Args:
         plugin: Short plugin name. One of: pslist, psscan, pstree, psxview,
-            cmdline, netscan, malfind, dlllist, handles, svcscan, hashdump.
+            cmdline, netscan, malfind, dlllist, handles, svcscan, amcache.
         memory_dump: Filename or full path to the dump file.
         filter_field: Column to filter on (e.g. PID, ImageFileName,
             ForeignAddr, Path). Leave empty to return the first `max_rows`.
@@ -383,7 +383,8 @@ async def query_plugin_rows(
         query_plugin_rows("pslist", "sample.raw", "ImageFileName", "powershell")
         query_plugin_rows("netscan", "sample.raw", "ForeignPort", "443")
         query_plugin_rows("handles", "sample.raw", "PID", "1168", max_rows=100)
-        query_plugin_rows("hashdump", "sample.raw", "User", "Administrator")
+        query_plugin_rows("amcache", "sample.raw", "Path", "AppData")
+        query_plugin_rows("amcache", "sample.raw", "SHA1Hash", "<sha1>")
     """
     plugin_key = (plugin or "").strip().lower()
     if plugin_key not in AVAILABLE_PLUGIN_NAMES:
@@ -615,13 +616,21 @@ async def run_psxview(
 
 
 @mcp.tool()
-async def run_hashdump(memory_dump: str, progress: Progress = Progress()) -> dict:
-    """Extract LM/NTLM account hashes from registry hives when credential evidence is in scope.
+async def run_amcache(memory_dump: str, progress: Progress = Progress()) -> dict:
+    """Pull Amcache execution evidence (program-run records) from the registry.
+
+    Amcache (Windows 7+, full coverage on Windows 8+) records every executable
+    that was launched, with its full path, SHA1 hash, install date, and
+    publisher metadata. Output is normally large — hundreds to thousands of
+    rows — so the response is a statistics + sample preview. Use
+    `query_plugin_rows("amcache", ...)` to filter on Path, SHA1Hash,
+    EntryType, or Company. The returned SHA1 values are real file hashes
+    suitable for VirusTotal lookups, unlike indicator-string hashes.
 
     Args:
         memory_dump: Filename or full path to the dump file.
     """
-    return await run_progress_plugin("windows.hashdump.Hashdump", memory_dump, progress)
+    return await run_progress_plugin("windows.registry.amcache.Amcache", memory_dump, progress)
 
 
 # --- Entrypoint ---

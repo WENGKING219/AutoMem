@@ -42,7 +42,7 @@ PLUGIN_TIMEOUTS = {
     "windows.netscan.NetScan": 300,
     "windows.psscan.PsScan": 240,
     "windows.psxview.PsXView": 240,
-    "windows.hashdump.Hashdump": 180,
+    "windows.registry.amcache.Amcache": 360,
 }
 
 PID_LIKE_FIELDS = {

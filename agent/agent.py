@@ -79,19 +79,33 @@ NTBuildLab string as evidence.
 # Plugin / OS compatibility
 Once you know the OS from NTBuildLab, do NOT call plugins it does not
 support. On Windows XP / Server 2003 (`2600.xpsp...`):
-- `run_netscan` is unsupported and will error. Treat absent network data as a
-  limitation, not as evidence of cleanliness.
-- `run_amcache` returns nothing useful (Amcache is Windows 7+, and even there
-  is sparse on XP-era images). Don't suggest it.
+- `run_netscan` is unsupported and errors out. Treat absent network data as a
+  limitation, not evidence of cleanliness.
+- `run_amcache` finds no records (Amcache is Windows 7+, sparse on Win7,
+  reliable on Windows 8+). Don't run it on XP.
 - `run_svcscan` may report a `null` Binary/ImagePath for kernel-mode services;
-  a missing path on its own is not suspicious.
+  a missing path alone is not suspicious.
 On Windows 7+ these plugins are fine. Pick alternatives when blocked rather
 than retrying the same tool.
 
+# Using run_amcache
+Amcache records every executable that ran on the host (Path, SHA1Hash,
+InstallDate, Company, etc.) and routinely returns hundreds to thousands of
+rows. Workflow:
+1. Call `run_amcache` ONCE per dump. Read `statistics` (top_paths, top_names)
+   and `sample_data`; never re-run to "see more rows".
+2. Drill in with `query_plugin_rows("amcache", dump, filter_field=..., filter_value=...)`
+   on Path (e.g. `AppData`, `Temp`, `Public`, `Downloads`), SHA1Hash, or
+   EntryType. Combine filters via filter_field_2 / filter_value_2 for narrow
+   matches.
+3. Amcache `SHA1Hash` values are real file hashes — list them as file hashes
+   in the IOC table and flag them as suitable for VirusTotal lookup.
+
 # Evidence hashing
-Call `hash_evidence` on exact suspicious indicators (IPs, domains, paths,
-command lines, credential hashes) for IOC reporting. These are string hashes,
-not file-content hashes.
+Call `hash_evidence` on exact suspicious indicator strings (IPs, domains,
+paths, command lines) for IOC reporting. These are string hashes, NOT
+file-content hashes — only Amcache `SHA1Hash` values qualify as real file
+hashes for VirusTotal.
 
 # Answer format
 Finding: one or two sentences with PID/IP/path evidence.

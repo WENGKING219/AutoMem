@@ -76,6 +76,7 @@ Rules:
 | "Network", "C2", "exfil"            | netscan            | query_plugin_rows by port/IP |
 | "Injection", "malware in memory"    | malfind            | dlllist + handles for the PID |
 | "Persistence"                       | svcscan            | cmdline for suspicious service PIDs |
+| "Execution evidence", "what ran"    | amcache            | query_plugin_rows on Path / SHA1Hash |
 
 ## Recipes
 
@@ -112,13 +113,32 @@ Rules:
 2. `run_cmdline`        -- search for `powershell -enc`, `mshta`, `regsvr32 /s /u`.
 3. Use `query_plugin_rows` on `svcscan` for suspicious service names or paths.
 
+### Recipe F -- Amcache execution evidence (Windows 7+ only)
+Amcache lists every executable that ran on the host with its full path,
+SHA1 file hash, and publisher metadata. It is normally large (hundreds to
+thousands of rows), so always read `statistics` first and drill in with
+`query_plugin_rows` rather than re-running the plugin.
+
+1. `run_amcache(memory_dump=dump)` -- one call only. Read `statistics`
+   (top_paths, top_names) and `sample_data` to spot outliers.
+2. Suspicious-path drill-in:
+   `query_plugin_rows(plugin="amcache", memory_dump=dump, filter_field="Path", filter_value="AppData", max_rows=100)`
+   -- repeat for `Temp`, `Public`, `Downloads`, `ProgramData`.
+3. Hash drill-in (combine with another filter when many matches):
+   `query_plugin_rows(plugin="amcache", memory_dump=dump, filter_field="SHA1Hash", filter_value="<sha1>")`
+4. The `SHA1Hash` column is a real file hash and is suitable for VirusTotal
+   lookups. Distinguish it from indicator-string hashes in the IOC table.
+5. If running on XP/2003 (`2600.xpsp...`), Amcache does not exist — skip and
+   document as "Evidence not collected (plugin unsupported on this OS)".
+
 ## Plugin / OS compatibility (check NTBuildLab first)
 
 - `netscan` requires Windows 7 or newer. On XP (`2600.xpsp...`) it errors with
   "not supported for this memory image's Windows version". Treat absent network
   data as a limitation, not as evidence of cleanliness.
-- `amcache` is a Windows 7+ artifact and is sparse before Windows 8. Do not
-  recommend it for XP-era dumps.
+- `amcache` requires Windows 7+ (sparse on Win7, full coverage on Win8+).
+  Skip on XP-era dumps. Output is large, so use `query_plugin_rows` filters
+  on Path / SHA1Hash / EntryType — never re-run the plugin to "see more rows".
 - `svcscan` runs on XP, but the `Binary`/`ImagePath` field is often `null` for
   kernel-mode services. A missing path on its own is not suspicious — judge by
   the service name and state.
@@ -147,6 +167,15 @@ Rules:
 - malfind regions with PAGE_EXECUTE_READWRITE.
 - MZ header found in heap or unmapped regions.
 - DLL paths outside system directories.
+
+### Amcache (execution history)
+- Executables run from `\AppData\`, `\Temp\`, `\Public\`, `\Downloads\`,
+  `\ProgramData\`, or any user-writable path.
+- Names mimicking system binaries (`svchost.exe`, `lsass.exe`) outside
+  `System32`/`SysWOW64`.
+- Recent `InstallDate` for an unfamiliar publisher right before the
+  capture time.
+- A `SHA1Hash` you do not recognise — capture it for VirusTotal lookup.
 
 ## Honest reporting (every turn)
 

@@ -22,5 +22,5 @@ def test_mcp_exposes_curated_plugin_set_only():
         "dlllist",
         "handles",
         "svcscan",
-        "hashdump",
+        "amcache",
     }

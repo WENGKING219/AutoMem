@@ -16,7 +16,7 @@ TOOL_HELP_NAMES = (
     "cmdline",
     "handles",
     "svcscan",
-    "hashdump",
+    "amcache",
     "scheduled tasks",
 )
 
@@ -32,7 +32,7 @@ TOOL_DESCRIPTIONS = {
     "cmdline": "extracts command-line arguments for processes.",
     "handles": "lists process handles such as files, registry keys, events, and mutexes.",
     "svcscan": "lists Windows services that may show persistence or suspicious service setup.",
-    "hashdump": "extracts LM/NTLM account hashes for credential evidence when explicitly requested.",
+    "amcache": "reads Amcache registry records to list executables that ran on the host with their full paths and SHA1 file hashes (Windows 7+, full coverage on Windows 8+).",
     "scheduled tasks": "can indicate persistence, but this build focuses on service persistence through svcscan.",
 }
 
@@ -76,7 +76,8 @@ FORENSIC_ACTION_HINTS = (
     "malware",
     "injection",
     "persistence",
-    "credential",
+    "amcache",
+    "execution evidence",
     "pid ",
     "process ",
 )
