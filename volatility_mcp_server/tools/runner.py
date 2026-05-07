@@ -31,7 +31,7 @@ VOL_FRAMEWORK_CACHE_DIR = Path(
 VOL_SYMBOL_DIRS = os.environ.get("VOL_SYMBOL_DIRS", "/app/symbols")
 TIMEOUT = int(os.environ.get("VOL_TIMEOUT", "300"))
 MAX_OUTPUT = int(os.environ.get("MAX_OUTPUT", "2000000"))
-MAX_ROWS_FULL = int(os.environ.get("MAX_ROWS_FULL", "80"))
+MAX_ROWS_FULL = int(os.environ.get("MAX_ROWS_FULL", "500"))
 CACHE_SCHEMA_VERSION = 2
 SUPPORTED_DUMP_EXTENSIONS = (".raw", ".mem", ".dmp", ".vmem", ".lime", ".img")
 
@@ -79,38 +79,7 @@ FIELD_ALIASES = {
     "state": {"state", "status"},
 }
 
-SUSPICIOUS_KEYWORDS = (
-    "\\temp\\",
-    "\\appdata\\local\\temp",
-    "\\users\\public\\",
-    "\\programdata\\",
-    "\\downloads\\",
-    "powershell.exe",
-    "wscript.exe",
-    "cscript.exe",
-    "rundll32.exe",
-    "regsvr32.exe",
-    "mshta.exe",
-)
-
-COMMAND_KEYWORDS = (
-    "powershell",
-    "-enc",
-    "encodedcommand",
-    "iex",
-    "invoke-webrequest",
-    "bitsadmin",
-    "certutil",
-    "mshta",
-    "regsvr32",
-    "rundll32",
-    "schtasks",
-    "wmic",
-    "vssadmin",
-    "bcdedit",
-)
-
-SUSPICIOUS_PORTS = {4444, 5555, 6667, 7777, 8080, 8443, 9001, 31337}
+SUSPICIOUS_PORTS: set[int] = set()
 
 
 def detect_plugin_name(cmd_args: list[str]) -> str:
@@ -278,16 +247,44 @@ def _rows_from_columns_shape(data: dict) -> list[dict] | None:
     return converted
 
 
+def _flatten_tree_rows(rows: list) -> list:
+    """Flatten Volatility's nested `__children` rows (used by pstree).
+
+    Volatility3's pstree returns one row per root process with descendants
+    nested under `__children`. Treating only the roots as rows hides the
+    full tree, so we walk the tree depth-first and depth-tag each node.
+    """
+    if not rows or not isinstance(rows[0], dict) or "__children" not in rows[0]:
+        return rows
+
+    flat: list = []
+
+    def visit(row: dict, depth: int) -> None:
+        if not isinstance(row, dict):
+            flat.append(row)
+            return
+        children = row.get("__children") or []
+        node = {key: value for key, value in row.items() if key != "__children"}
+        node.setdefault("Depth", depth)
+        flat.append(node)
+        for child in children:
+            visit(child, depth + 1)
+
+    for root in rows:
+        visit(root, 0)
+    return flat
+
+
 def coerce_row_list(data: Any) -> list | None:
     """Return a row list from common Volatility/FastMCP JSON shapes."""
     if isinstance(data, list):
-        return data
+        return _flatten_tree_rows(data)
     if not isinstance(data, dict):
         return None
 
     table_rows = _rows_from_columns_shape(data)
     if table_rows is not None:
-        return table_rows
+        return _flatten_tree_rows(table_rows)
 
     for key in ("data", "rows", "results", "items"):
         value = data.get(key)
@@ -295,8 +292,8 @@ def coerce_row_list(data: Any) -> list | None:
             if key == "rows":
                 table_rows = _rows_from_columns_shape(data)
                 if table_rows is not None:
-                    return table_rows
-            return value
+                    return _flatten_tree_rows(table_rows)
+            return _flatten_tree_rows(value)
         if isinstance(value, dict):
             nested = coerce_row_list(value)
             if nested is not None:
@@ -791,11 +788,11 @@ def summarise_json_rows(rows: list[Any], max_chars: int) -> str:
         "total_rows": total,
         "showing_first": len(sample),
         "statistics": stats,
-        "suggested_filters": build_suggested_filters(stats),
         "sample_data": sample,
         "next_action_hint": (
-            "If you need rows that are not in sample_data, call query_plugin_rows "
-            "with the same plugin short name plus filter_field and filter_value. "
+            "Statistics include top_names, top_paths, and other distributions you "
+            "can use to identify outliers yourself. If you need rows not in "
+            "sample_data, call query_plugin_rows with filter_field and filter_value. "
             "Do not re-run the original plugin just to see more rows."
         ),
     }
@@ -816,7 +813,7 @@ def summarise_json_rows(rows: list[Any], max_chars: int) -> str:
     for key in ("columns", "sample_pids"):
         if isinstance(slim_stats.get(key), list):
             slim_stats[key] = slim_stats[key][:20]
-    for key in ("flagged_rows", "command_indicator_rows", "psxview_disagreement_rows"):
+    for key in ("psxview_disagreement_rows",):
         if isinstance(slim_stats.get(key), list):
             slim_stats[key] = slim_stats[key][:8]
 
@@ -824,7 +821,6 @@ def summarise_json_rows(rows: list[Any], max_chars: int) -> str:
         {
             "total_rows": total,
             "statistics": slim_stats,
-            "suggested_filters": build_suggested_filters(slim_stats),
             "next_action_hint": result["next_action_hint"],
             "note": "Sample rows omitted because they did not fit the response budget.",
         },
@@ -863,7 +859,7 @@ def summarise_json_object(data: Any, max_chars: int) -> str:
     return json.dumps({"note": "JSON value truncated for preview."}, indent=2)
 
 
-def _compact_preview_rows(rows: list[Any], max_value_chars: int = 220) -> list[Any]:
+def _compact_preview_rows(rows: list[Any], max_value_chars: int = 1000) -> list[Any]:
     """Clip long values in sampled JSON rows so previews stay compact."""
     compact_rows: list[Any] = []
     for row in rows:
@@ -924,46 +920,13 @@ def _sort_pid_values(values: Iterable[Any]) -> list[Any]:
 
 
 def build_suggested_filters(stats: dict) -> list[dict]:
-    """Return concrete query_plugin_rows filters the agent can use next."""
-    suggestions = []
-    for row in stats.get("flagged_rows", [])[:5]:
-        pid = row.get("PID")
-        if pid is not None:
-            suggestions.append(
-                {"reason": "Inspect flagged PID", "filter_field": "PID", "filter_value": str(pid)}
-            )
-    for row in stats.get("psxview_disagreement_rows", [])[:5]:
-        pid = row.get("PID")
-        if pid is not None:
-            suggestions.append(
-                {"reason": "Inspect psxview disagreement", "filter_field": "PID", "filter_value": str(pid)}
-            )
-    for port in stats.get("suspicious_foreign_ports", [])[:5]:
-        suggestions.append(
-            {
-                "reason": "Inspect suspicious foreign port",
-                "filter_field": "ForeignPort",
-                "filter_value": str(port),
-            }
-        )
-    for addr in list(stats.get("top_foreign_addrs", {}).keys())[:5]:
-        if addr not in {"0.0.0.0", "::", "*"}:
-            suggestions.append(
-                {
-                    "reason": "Inspect repeated foreign address",
-                    "filter_field": "ForeignAddr",
-                    "filter_value": str(addr),
-                }
-            )
-    # Deduplicate while preserving order.
-    seen = set()
-    unique = []
-    for item in suggestions:
-        key = (item.get("filter_field"), item.get("filter_value"))
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
-    return unique[:8]
+    """Kept for backward compatibility. Returns no suggestions.
+
+    The MCP server no longer pre-judges which rows are suspicious. Callers
+    should look at top_names, top_paths, command_indicator_rows, and
+    psxview_disagreement_rows in `statistics` and form their own conclusions.
+    """
+    return []
 
 
 def extract_row_stats(data: list[dict]) -> dict:
@@ -1019,7 +982,6 @@ def extract_row_stats(data: list[dict]) -> dict:
         foreign_ports = {}
         foreign_addrs = {}
         states = {}
-        suspicious_foreign_ports = set()
         for row in row_dicts:
             lp = row.get(local_port_column) if local_port_column else None
             fp = row.get(foreign_port_column) if foreign_port_column else None
@@ -1029,9 +991,6 @@ def extract_row_stats(data: list[dict]) -> dict:
                 local_ports[lp] = local_ports.get(lp, 0) + 1
             if fp not in (None, ""):
                 foreign_ports[fp] = foreign_ports.get(fp, 0) + 1
-                parsed_port = parse_intish(fp)
-                if parsed_port in SUSPICIOUS_PORTS:
-                    suspicious_foreign_ports.add(fp)
             if fa not in (None, ""):
                 foreign_addrs[fa] = foreign_addrs.get(fa, 0) + 1
             if st not in (None, ""):
@@ -1042,30 +1001,9 @@ def extract_row_stats(data: list[dict]) -> dict:
             stats["top_foreign_ports"] = dict(sorted(foreign_ports.items(), key=lambda x: -x[1])[:10])
         if foreign_addrs:
             stats["top_foreign_addrs"] = dict(sorted(foreign_addrs.items(), key=lambda x: -x[1])[:10])
-        if suspicious_foreign_ports:
-            stats["suspicious_foreign_ports"] = sorted(suspicious_foreign_ports, key=lambda x: str(x))
         if states:
             stats["state_counts"] = states
 
-    cmd_column = _find_column(row_dicts, ("CommandLine", "Cmdline", "Args", "Command"))
-    if cmd_column:
-        hits = []
-        for row in row_dicts:
-            command = str(row.get(cmd_column, ""))
-            lowered = command.lower()
-            matched = [token for token in COMMAND_KEYWORDS if token in lowered]
-            if matched:
-                hits.append(
-                    {
-                        "PID": row.get(pid_column) if pid_column else None,
-                        "name": row.get(name_column) if name_column else None,
-                        "matched": matched[:5],
-                        "command": command[:220],
-                    }
-                )
-        if hits:
-            stats["command_indicator_rows"] = hits[:15]
-            stats["command_indicator_count"] = len(hits)
 
     visibility_columns = [
         col
@@ -1103,24 +1041,5 @@ def extract_row_stats(data: list[dict]) -> dict:
         if disagreement_rows:
             stats["psxview_disagreement_count"] = len(disagreement_rows)
             stats["psxview_disagreement_rows"] = disagreement_rows[:15]
-
-    flagged = []
-    for row in row_dicts:
-        for field in (name_column, path_column, cmd_column):
-            if not field:
-                continue
-            value = str(row.get(field, "")).lower()
-            if any(token in value for token in SUSPICIOUS_KEYWORDS):
-                flagged.append(
-                    {
-                        "PID": row.get(pid_column) if pid_column else None,
-                        "name": row.get(name_column) if name_column else None,
-                        "path": row.get(path_column) if path_column else None,
-                    }
-                )
-                break
-    if flagged:
-        stats["flagged_rows"] = flagged[:15]
-        stats["flagged_count"] = len(flagged)
 
     return stats

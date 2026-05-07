@@ -20,7 +20,7 @@ services:
       VOL_SYMBOL_DIRS: /app/symbols
       VOL_TIMEOUT: "300"
       MAX_OUTPUT: "2000000"
-      MAX_ROWS_FULL: "80"
+      MAX_ROWS_FULL: "500"
       PYTHONUNBUFFERED: "1"
     restart: unless-stopped
     healthcheck:

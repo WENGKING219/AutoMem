@@ -24,25 +24,22 @@ Every Volatility tool returns JSON shaped like:
        "top_foreign_ports": {"443": 38, "80": 21, "4444": 3},
        "top_foreign_addrs": {"185.10.20.30": 3},
        "state_counts": {"LISTENING": 60, "ESTABLISHED": 9, "CLOSED": 343},
-       "command_indicator_rows": [{"PID": 1168, "matched": ["powershell"]}],
-       "flagged_rows": [{"PID": 1168, "name": "svchost.exe",
-                          "path": "C:\\Users\\Public\\svchost.exe"}],
-       "flagged_count": 1,
+       "top_names": {"svchost.exe": 12, ...},
+       "top_paths": {"C:\\Windows\\System32\\svchost.exe": 12, ...},
+       "psxview_disagreement_rows": [{"PID": 1260, "missing_from": ["pslist","psxview"]}],
        "sample_pids": [4, 372, 1168, ...]
     },
-    "suggested_filters": [
-      {"reason": "Inspect flagged PID", "filter_field": "PID", "filter_value": "1168"}
-    ],
-    "sample_data": [ ... up to 60 rows ... ],
+    "sample_data": [ ... up to MAX_ROWS_FULL rows ... ],
     "next_action_hint": "Use query_plugin_rows to drill in."
   }
 }
 ```
 
-Always check `statistics` first. Most questions are answered by
-`top_*`, `state_counts`, `command_indicator_rows`, `flagged_rows`, or
-`top_paths` without reading individual rows. If `suggested_filters` is
-present, use one of those filters for the next drill-down.
+Always check `statistics` first. `top_names`, `top_paths`, `state_counts`,
+`top_foreign_*`, and `psxview_disagreement_rows` answer most questions
+without reading individual rows. The server does NOT pre-flag suspicious
+rows for you — form your own conclusions from the distributions and pull
+specific rows with `query_plugin_rows` when needed.
 
 ## Drilling in without re-running plugins
 
@@ -79,13 +76,12 @@ Rules:
 | "Network", "C2", "exfil"            | netscan            | query_plugin_rows by port/IP |
 | "Injection", "malware in memory"    | malfind            | dlllist + handles for the PID |
 | "Persistence"                       | svcscan            | cmdline for suspicious service PIDs |
-| "Credential hashes", "hashdump"     | hashdump           | hash_evidence on recovered hashes |
 
 ## Recipes
 
 ### Recipe A -- Triage from cold
 1. `get_image_info`  -- confirm OS, capture time
-2. `run_pslist`      -- read `flagged_rows` and `top_names`
+2. `run_pslist`      -- read `top_names` and look for outlier paths
 3. `run_pstree`      -- look for unusual parents
 4. For each PID flagged: `query_plugin_rows(plugin="cmdline", memory_dump=dump, filter_field="PID", filter_value="<pid>")`
 5. STOP once you can answer. Do NOT run every tool by reflex.
@@ -116,12 +112,18 @@ Rules:
 2. `run_cmdline`        -- search for `powershell -enc`, `mshta`, `regsvr32 /s /u`.
 3. Use `query_plugin_rows` on `svcscan` for suspicious service names or paths.
 
-### Recipe F -- Credential hash check
-1. Use only when the user asks for credential hashes, account hashes, or hashdump.
-2. `run_hashdump` once for the selected dump.
-3. If hashes are recovered, report username/RID and LM/NTLM values exactly.
-4. Call `hash_evidence` on recovered hash strings for MD5/SHA1/SHA256 indicator hashes.
-5. State clearly that LM/NTLM hashes are credential hashes, not VirusTotal file hashes.
+## Plugin / OS compatibility (check NTBuildLab first)
+
+- `netscan` requires Windows 7 or newer. On XP (`2600.xpsp...`) it errors with
+  "not supported for this memory image's Windows version". Treat absent network
+  data as a limitation, not as evidence of cleanliness.
+- `amcache` is a Windows 7+ artifact and is sparse before Windows 8. Do not
+  recommend it for XP-era dumps.
+- `svcscan` runs on XP, but the `Binary`/`ImagePath` field is often `null` for
+  kernel-mode services. A missing path on its own is not suspicious — judge by
+  the service name and state.
+- `malfind`, `pslist`, `psscan`, `pstree`, `psxview`, `cmdline`, `dlllist`,
+  `handles`, `svcscan` work on every supported Windows version.
 
 ## What "suspicious" looks like (quick reference)
 

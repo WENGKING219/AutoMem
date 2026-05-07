@@ -8,16 +8,17 @@ def test_quick_actions_are_small_and_demo_safe():
         "Initial Triage",
         "Hidden Process",
         "Network",
-        "Credential Hashes",
         "Generate Report",
     ]:
         assert f'label="{label}"' in frontend_source or f'label = "{label}"' in frontend_source
 
+    # Hashdump quick action was removed; the prompt should no longer mention it.
+    assert "Credential Hashes" not in frontend_source
+    assert "run_hashdump" not in frontend_source
+
     combined = frontend_source.lower()
     assert "query_plugin_rows" in combined
-    assert "run_hashdump" in combined
-    assert "hash_evidence" in combined
-    assert "use at most 8 volatility calls" in combined
+    assert "save_report" in combined
     assert "do not skip any" not in combined
     assert "run all" not in combined
     assert "def build_quick_actions" in frontend_source

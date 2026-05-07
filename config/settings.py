@@ -36,7 +36,7 @@ OLLAMA_FAST_NUM_PREDICT = int(
     os.getenv("OLLAMA_FAST_NUM_PREDICT", os.getenv("OLLAMA_NUM_PREDICT", "4096"))
 )
 # Allow deeper turns such as triage and report generation to run a bit longer.
-OLLAMA_DEEP_NUM_PREDICT = int(os.getenv("OLLAMA_DEEP_NUM_PREDICT", "6144"))
+OLLAMA_DEEP_NUM_PREDICT = int(os.getenv("OLLAMA_DEEP_NUM_PREDICT", "12288"))
 OLLAMA_NUM_BATCH = int(os.getenv("OLLAMA_NUM_BATCH", "256"))
 
 # GPU offloading — -1 means "put all layers on GPU".

@@ -8,16 +8,6 @@ from pathlib import PurePath
 from typing import Any
 
 
-def _has_section(text: str, section_name: str) -> bool:
-    lowered = text.lower()
-    markers = (
-        f"{section_name.lower()}:",
-        f"## {section_name.lower()}",
-        f"### {section_name.lower()}",
-    )
-    return any(marker in lowered for marker in markers)
-
-
 def _coerce_tool_payload(value: Any) -> Any:
     """Decode MCP/adapter tool payloads into their underlying JSON when possible."""
     if not isinstance(value, str):
@@ -158,17 +148,4 @@ def normalize_chat_reply(
             "Limitations:\n- The response was empty."
         )
 
-    if is_report or not include_quality_sections:
-        return text
-
-    parts = [text]
-    if not _has_section(text, "Confidence"):
-        parts.append(
-            "Confidence: Medium - based on the current evidence collected in this turn."
-        )
-    if not _has_section(text, "Limitations"):
-        parts.append(
-            "Limitations:\n"
-            "- Results may be partial if plugin output was truncated or the analysis was scoped."
-        )
-    return "\n\n".join(parts)
+    return text

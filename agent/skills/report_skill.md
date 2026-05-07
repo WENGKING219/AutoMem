@@ -4,19 +4,18 @@ Use this when the user asks for a formal report. Follow the template exactly.
 
 ## Hard rules
 
-1. Match the user's report scope: triage, full case, network, malware, or credential hashes.
-2. Every claim must trace back to a Volatility tool call made this turn or earlier in the thread.
+1. Match the user's report scope: triage, full case, network, or malware.
+2. Every claim must trace back to a Volatility tool call made this turn or earlier in the thread. Reuse evidence already collected in the conversation rather than re-running plugins.
 3. Use the exact local analysis time injected by the harness. Do not guess the date.
 4. Confidence values must be High, Medium, or Low.
-5. Keep normal report generation within 8 Volatility tool calls before `save_report`.
-6. Run `run_hashdump` only when the user asks for credential/account hashes, hashdump, or credential evidence.
-7. If suspicious evidence exists, call `hash_evidence` on the exact suspicious values and include its output.
-8. Clearly label hash types:
+5. Keep normal report generation within 8 Volatility tool calls before `save_report`. In long sessions where evidence is already collected, target 0-4 new calls.
+6. If suspicious evidence exists, call `hash_evidence` on the exact suspicious values and include its output.
+7. Clearly label hash types:
    - file hash: only when the value came from file bytes or a known file hash field
-   - credential hash: LM/NTLM/hashdump output
    - indicator-string hash: hash of a path, command, IP, service name, or other exact text indicator
-9. VirusTotal file lookups are appropriate for real file hashes. Do not present path-string hashes as file hashes.
-10. Write the full Markdown report first. Then call `save_report`.
+8. VirusTotal file lookups are appropriate for real file hashes. Do not present path-string hashes as file hashes.
+9. Write the full Markdown report first. Then call `save_report`.
+10. Skip plugins the OS does not support (e.g. netscan/amcache on XP). Document the gap as a limitation rather than retrying.
 
 ## Filling discipline
 
@@ -93,7 +92,7 @@ Use this when the user asks for a formal report. Follow the template exactly.
 
 | Type | Value | Confidence | Context | Source |
 |---|---|---|---|---|
-| {process/network/path/credential_hash/string_hash} | {value} | {High/Medium/Low} | {why_it_matters} | {plugin/tool} |
+| {process/network/path/string_hash} | {value} | {High/Medium/Low} | {why_it_matters} | {plugin/tool} |
 
 ---
 
@@ -101,7 +100,7 @@ Use this when the user asks for a formal report. Follow the template exactly.
 
 | Evidence Type | Original Value | MD5 | SHA1 | SHA256 | VirusTotal Use |
 |---|---|---|---|---|---|
-| {file_hash/credential_hash/indicator_string_hash} | {value} | {md5} | {sha1} | {sha256} | {real_file_hash_only_or_not_file_hash} |
+| {file_hash/indicator_string_hash} | {value} | {md5} | {sha1} | {sha256} | {real_file_hash_only_or_not_file_hash} |
 
 If no suspicious evidence was found, write: "No suspicious evidence hashes were generated in this pass."
 
@@ -129,7 +128,6 @@ If no suspicious evidence was found, write: "No suspicious evidence hashes were 
 - Does every suspicious row have evidence, confidence, and source?
 - Is OS identification based on NTBuildLab, not the Major/Minor row alone?
 - Did you call `hash_evidence` for suspicious values or state that no suspicious hashes were generated?
-- Are credential hashes clearly labeled as credential hashes, not file hashes?
 - Are all placeholders removed?
 - Is the date the exact harness-provided local time?
 

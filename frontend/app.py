@@ -81,84 +81,42 @@ def build_quick_actions(dump_name: str) -> list[QuickAction]:
             label="Initial Triage",
             icon=":material/radar:",
             prompt=(
-                f"Run initial triage on {dump}. Use get_image_info, run_pslist, "
-                "run_pstree, and run_psscan. Summarise the highest-confidence "
-                "process findings and use query_plugin_rows only if a specific "
-                "PID or process name needs drill-down."
+                f"Triage {dump}. Start with get_image_info and run_pslist; "
+                "add run_pstree or run_psscan if needed. Report any suspicious "
+                "processes with evidence and confidence. Use query_plugin_rows "
+                "to drill in on specific PIDs."
             ),
         ),
         QuickAction(
             label="Hidden Process",
             icon=":material/visibility_off:",
             prompt=(
-                f"Check {dump} for hidden or unlinked processes. "
-                "Step 1: run_pslist and run_psscan. Compare the row counts â€” if psscan "
-                "returns more rows than pslist, those extra entries are candidates for "
-                "hidden or terminated processes. "
-                "Step 2: run_psxview. Because psxview output can be large (100+ rows), "
-                "do NOT try to read every row â€” instead use query_plugin_rows on psxview "
-                "filtering by the specific PID of any process that appeared in psscan but "
-                "not pslist to confirm disagreement. "
-                "Report findings with PID, process name, and which views agree or disagree."
+                f"Find hidden or unlinked processes in {dump}. Compare run_pslist "
+                "and run_psscan; investigate any disagreement with run_psxview and "
+                "query_plugin_rows by PID. Report PID, name, and which views agree."
             ),
         ),
         QuickAction(
             label="Network",
             icon=":material/hub:",
             prompt=(
-                f"Investigate network and persistence indicators in {dump}. Use "
-                "run_netscan and run_svcscan first, then use query_plugin_rows "
-                "for suspicious ports, PIDs, service names, or paths. Keep the "
-                "scope focused and evidence-based."
-            ),
-        ),
-        QuickAction(
-            label="Credential Hashes",
-            icon=":material/key:",
-            prompt=(
-                f"Check whether {dump} contains recoverable Windows account hashes. "
-                "Run run_hashdump once. If hashes are recovered, report username, "
-                "RID, LM/NTLM hash values, and confidence. Then call hash_evidence "
-                "on the recovered hash strings so the response includes MD5, SHA1, "
-                "and SHA256 hashes of the exact credential indicators. Clearly state "
-                "that LM/NTLM credential hashes are not VirusTotal file hashes."
+                f"Investigate network and persistence in {dump}. Run run_netscan "
+                "and run_svcscan, then use query_plugin_rows on suspicious "
+                "ports, PIDs, or service paths. Tie endpoints back to a process."
             ),
         ),
         QuickAction(
             label="Generate Report",
             icon=":material/description:",
             prompt=(
-                f"Generate the final memory-forensics report for {dump}.\n"
-                "Use at most 8 Volatility calls. Collect only focused evidence: "
-                "get_image_info, pslist, pstree, psscan/psxview if needed, netscan, "
-                "svcscan, malfind, and cmdline/dlllist only for confirmed suspicious PIDs.\n"
-                "Run tools silently; do not emit interim Finding/Evidence/Next-step blocks. "
-                "After tool use, write one complete Markdown report starting with "
-                "'# Memory Forensics Analysis Report' and call save_report.\n"
-                "If suspicious IOCs, credential hashes, confirmed malfind hits, or unusual "
-                "process/address artifacts are found, call hash_evidence on the exact values "
-                "and label each result as file hash, credential hash, or exact string hash.\n"
-                "Use NTBuildLab for OS identification. Every section must cite collected "
-                "evidence or state 'Evidence not collected in this pass.' No placeholders.\n"
-                "Include exactly these 10 sections:\n"
-                "1. Executive Summary — one-paragraph verdict with confidence level.\n"
-                "2. System Profile — OS name from NTBuildLab, architecture, capture time.\n"
-                "3. Process Analysis — Markdown table with columns PID | Name | PPID | Anomaly | Confidence. "
-                "Read PID and PPID directly from pslist rows. "
-                "For processes present in psscan but absent from pslist (hidden/terminated), "
-                "read PPID from the psscan row. Never invent or approximate PID/PPID values; "
-                "if a value is genuinely unavailable write N/A.\n"
-                "4. Network Analysis — cite exact netscan rows for connections and listeners. "
-                "If netscan failed, quote the exact error message returned by the tool.\n"
-                "5. Persistence — notable entries from svcscan: service name, binary path, state.\n"
-                "6. Injection / Code Analysis — malfind hits with process name, PID, protection flags, "
-                "and MZ-header verdict (confirmed/suspected/clean).\n"
-                "7. IOC Summary Table — Type | Value | Confidence | Context.\n"
-                "8. Evidence Hashes / VirusTotal Lookup Notes — hash_evidence results only; "
-                "omit this section's body if no hashes were generated.\n"
-                "9. Recommendations — numbered action items.\n"
-                "10. Limitations — distinguish: (a) tools that ran but returned no rows, "
-                "(b) tools that errored (quote the error), (c) tools not run this pass."
+                f"Write the final memory-forensics report for {dump} now.\n"
+                "Reuse evidence already collected in this conversation; only call "
+                "a tool if a section has no usable data yet, and stop at 4 new "
+                "calls. Skip tools that errored earlier (e.g. netscan on XP).\n"
+                "Output one Markdown report starting with '# Memory Forensics "
+                "Analysis Report' and the 10 sections from the system prompt, "
+                "then call save_report once. Every section cites a tool result "
+                "or states 'Evidence not collected in this pass.' No placeholders."
             ),
             is_report=True,
         ),
@@ -255,7 +213,6 @@ TOOL_LABELS = {
     "run_handles": "Listing open handles (handles)",
     "run_svcscan": "Checking Windows services (svcscan)",
     "run_psxview": "Cross-checking hidden processes (psxview)",
-    "run_hashdump": "Extracting credential hashes (hashdump)",
     "hash_evidence": "Hashing suspicious evidence values",
     "compact_conversation": "Compacting conversation context",
     "save_report": "Saving report to disk",
@@ -2207,7 +2164,10 @@ def render_chat_area():
                                      icon=":material/save:")
                         else:
                             st.warning(
-                                "Report was not saved because the generated content did not pass the report quality checks."
+                                "Report was not saved: the model's reply did not have a complete report shape "
+                                "(missing required sections, placeholders left in, or the model lost context "
+                                "after a long session). Click **New Session**, run a couple of focused triage "
+                                "actions, then click **Generate Report** again."
                             )
                     else:
                         st.toast("Report saved", icon=":material/save:")

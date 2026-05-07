@@ -125,7 +125,7 @@ def file_not_found_result(memory_dump: str) -> dict:
     return error_result("input", str(memory_dump), f"File not found: {memory_dump}")
 
 
-def parse_max_rows(value, *, default: int = 50, hard_cap: int = 200) -> int:
+def parse_max_rows(value, *, default: int = 50, hard_cap: int = 1000) -> int:
     """Parse and clamp the LLM-provided max_rows argument."""
     if value in (None, ""):
         return default
