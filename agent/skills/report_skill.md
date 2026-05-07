@@ -2,20 +2,28 @@
 
 Use this when the user asks for a formal report. Follow the template exactly.
 
+## Tools cited in this template
+
+Plugin sources allowed in the Source columns: `get_image_info`, `pslist`,
+`psscan`, `pstree`, `psxview`, `cmdline`, `netscan`, `malfind`, `dlllist`,
+`handles`, `svcscan`, `amcache`. Reporting helpers: `hash_evidence`,
+`save_report`. Use `query_plugin_rows` for drill-downs; cite the underlying
+plugin name in the Source column, not `query_plugin_rows`.
+
 ## Hard rules
 
-1. Match the user's report scope: triage, full case, network, or malware.
+1. Match the user's report scope: triage, full case, network, malware, or execution history.
 2. Every claim must trace back to a Volatility tool call made this turn or earlier in the thread. Reuse evidence already collected in the conversation rather than re-running plugins.
 3. Use the exact local analysis time injected by the harness. Do not guess the date.
 4. Confidence values must be High, Medium, or Low.
 5. Keep normal report generation within 8 Volatility tool calls before `save_report`. In long sessions where evidence is already collected, target 0-4 new calls.
-6. If suspicious evidence exists, call `hash_evidence` on the exact suspicious values and include its output.
+6. If suspicious evidence exists, call `hash_evidence` on the exact suspicious indicator strings (paths, commands, IPs, service names) and include its output. Amcache `SHA1Hash` values are real file hashes — do not pass them through `hash_evidence`; list them directly.
 7. Clearly label hash types:
-   - file hash: only when the value came from file bytes or a known file hash field
+   - file hash: a real SHA1 from `amcache`, or another value derived from file bytes
    - indicator-string hash: hash of a path, command, IP, service name, or other exact text indicator
-8. VirusTotal file lookups are appropriate for real file hashes. Do not present path-string hashes as file hashes.
+8. VirusTotal file lookups are appropriate for real file hashes (e.g. amcache SHA1). Do not present path-string hashes as file hashes.
 9. Write the full Markdown report first. Then call `save_report`.
-10. Skip plugins the OS does not support (e.g. netscan/amcache on XP). Document the gap as a limitation rather than retrying.
+10. Skip plugins the OS does not support (e.g. `netscan`/`amcache` on XP). Document the gap as a limitation rather than retrying.
 
 ## Filling discipline
 
@@ -72,11 +80,16 @@ Use this when the user asks for a formal report. Follow the template exactly.
 
 ---
 
-## 5. Persistence
+## 5. Persistence & Execution History
+
+Service entries from `svcscan`, plus notable executables seen in `amcache`
+(executions from user-writable paths, unfamiliar publishers, recent
+InstallDates). On Windows XP `amcache` is unavailable — write
+"Evidence not collected (plugin unsupported on this OS)" instead.
 
 | Mechanism | Detail | Confidence | Source |
 |---|---|---|---|
-| {service_or_none} | {binary_path_or_reason} | {High/Medium/Low} | svcscan/cmdline |
+| {service_or_executable_or_none} | {binary_path_sha1_or_reason} | {High/Medium/Low} | svcscan / cmdline / amcache |
 
 ---
 
@@ -90,9 +103,13 @@ Use this when the user asks for a formal report. Follow the template exactly.
 
 ## 7. IOC Summary Table
 
+Use one row per indicator. Type can be `process`, `network`, `path`,
+`service`, `file_hash` (e.g. amcache SHA1), or `string_hash` (output of
+`hash_evidence`).
+
 | Type | Value | Confidence | Context | Source |
 |---|---|---|---|---|
-| {process/network/path/string_hash} | {value} | {High/Medium/Low} | {why_it_matters} | {plugin/tool} |
+| {process/network/path/service/file_hash/string_hash} | {value} | {High/Medium/Low} | {why_it_matters} | {pslist/netscan/svcscan/amcache/...} |
 
 ---
 
@@ -100,9 +117,15 @@ Use this when the user asks for a formal report. Follow the template exactly.
 
 | Evidence Type | Original Value | MD5 | SHA1 | SHA256 | VirusTotal Use |
 |---|---|---|---|---|---|
-| {file_hash/indicator_string_hash} | {value} | {md5} | {sha1} | {sha256} | {real_file_hash_only_or_not_file_hash} |
+| {file_hash/indicator_string_hash} | {value} | {md5} | {sha1} | {sha256} | {yes_real_file_hash_or_no_indicator_string_only} |
 
-If no suspicious evidence was found, write: "No suspicious evidence hashes were generated in this pass."
+Notes:
+- Amcache `SHA1Hash` values come from file bytes — they are real file hashes
+  and are appropriate for VirusTotal lookups. Mark VirusTotal Use = `yes`.
+- `hash_evidence` outputs hash exact indicator strings (paths, commands,
+  IPs). Mark VirusTotal Use = `no, indicator string only`.
+- If nothing suspicious was found, write: "No suspicious evidence hashes
+  were generated in this pass."
 
 ---
 

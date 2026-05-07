@@ -5,6 +5,20 @@ investigation. The system prompt has the high-level decision tree; this
 file gives you concrete signal-to-action mappings, query recipes, and the
 exact things to look at in tool output.
 
+## Tools available
+
+Volatility plugin runners: `get_image_info`, `run_pslist`, `run_psscan`,
+`run_pstree`, `run_psxview`, `run_cmdline`, `run_netscan`, `run_malfind`,
+`run_dlllist`, `run_handles`, `run_svcscan`, `run_amcache`.
+
+Cached drill-down: `query_plugin_rows` (plugin short names: pslist,
+psscan, pstree, psxview, cmdline, netscan, malfind, dlllist, handles,
+svcscan, amcache).
+
+Reporting helpers: `hash_evidence` for IOC string hashes, `save_report`
+to persist the final Markdown. Server/housekeeping: `server_diagnostics`,
+`list_memory_dumps`. Anything else is not available — do not call it.
+
 ## Reading tool output (do this every time)
 
 Every Volatility tool returns JSON shaped like:
@@ -72,7 +86,7 @@ Rules:
 |-------------------------------------|--------------------|------|
 | "What's on this dump"               | get_image_info     | pslist, pstree |
 | "Hidden processes"                  | psscan             | psxview, compare with pslist |
-| "Suspicious processes"              | pslist             | look at flagged_rows + cmdline |
+| "Suspicious processes"              | pslist             | scan top_names/top_paths, then cmdline for outliers |
 | "Network", "C2", "exfil"            | netscan            | query_plugin_rows by port/IP |
 | "Injection", "malware in memory"    | malfind            | dlllist + handles for the PID |
 | "Persistence"                       | svcscan            | cmdline for suspicious service PIDs |

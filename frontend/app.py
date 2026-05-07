@@ -81,28 +81,52 @@ def build_quick_actions(dump_name: str) -> list[QuickAction]:
             label="Initial Triage",
             icon=":material/radar:",
             prompt=(
-                f"Triage {dump}. Start with get_image_info and run_pslist; "
-                "add run_pstree or run_psscan if needed. Report any suspicious "
-                "processes with evidence and confidence. Use query_plugin_rows "
-                "to drill in on specific PIDs."
+                f"Triage {dump}. Run get_image_info and run_pslist first; add "
+                "run_pstree or run_psscan only if a process needs more context. "
+                "Cite NTBuildLab for the OS and call out suspicious processes "
+                "with evidence and confidence. Use query_plugin_rows to drill "
+                "into specific PIDs — never re-run a plugin to see more rows."
             ),
         ),
         QuickAction(
             label="Hidden Process",
             icon=":material/visibility_off:",
             prompt=(
-                f"Find hidden or unlinked processes in {dump}. Compare run_pslist "
-                "and run_psscan; investigate any disagreement with run_psxview and "
-                "query_plugin_rows by PID. Report PID, name, and which views agree."
+                f"Find hidden or unlinked processes in {dump}. Run run_pslist "
+                "and run_psscan; for any PID present in psscan but missing "
+                "from pslist, run run_psxview once and use "
+                "query_plugin_rows(plugin=\"psxview\", filter_field=\"PID\", "
+                "filter_value=\"<pid>\") to confirm which views see it. "
+                "Report PID, name, and which views agree or disagree."
             ),
         ),
         QuickAction(
             label="Network",
             icon=":material/hub:",
             prompt=(
-                f"Investigate network and persistence in {dump}. Run run_netscan "
-                "and run_svcscan, then use query_plugin_rows on suspicious "
-                "ports, PIDs, or service paths. Tie endpoints back to a process."
+                f"Investigate network activity in {dump}. Run run_netscan once, "
+                "read top_foreign_ports / top_foreign_addrs / state_counts in "
+                "statistics, then drill into suspicious endpoints with "
+                "query_plugin_rows(plugin=\"netscan\", ...) by ForeignPort, "
+                "ForeignAddr, or PID. Tie each suspicious endpoint back to a "
+                "process via run_pslist or run_cmdline. If netscan errors on "
+                "this OS (e.g. Windows XP), document it and stop — do not retry."
+            ),
+        ),
+        QuickAction(
+            label="Persistence & Execution",
+            icon=":material/manage_history:",
+            prompt=(
+                f"Investigate persistence and execution history in {dump}. "
+                "Run run_svcscan once and skim top_paths / top_names for "
+                "services with binaries outside System32/SysWOW64; drill in "
+                "with query_plugin_rows(plugin=\"svcscan\", ...). Then run "
+                "run_amcache once (Windows 7+ only — skip on XP) and read its "
+                "statistics; drill in with "
+                "query_plugin_rows(plugin=\"amcache\", filter_field=\"Path\", "
+                "filter_value=\"AppData\") (also Temp, Public, Downloads, "
+                "ProgramData) to flag executions from user-writable paths. "
+                "Capture amcache SHA1Hash values as file hashes for VirusTotal."
             ),
         ),
         QuickAction(
@@ -110,9 +134,10 @@ def build_quick_actions(dump_name: str) -> list[QuickAction]:
             icon=":material/description:",
             prompt=(
                 f"Write the final memory-forensics report for {dump} now.\n"
-                "Reuse evidence already collected in this conversation; only call "
-                "a tool if a section has no usable data yet, and stop at 4 new "
-                "calls. Skip tools that errored earlier (e.g. netscan on XP).\n"
+                "Reuse evidence already collected in this conversation; only "
+                "call a tool if a section has no usable data yet, and stop at "
+                "4 new calls. Skip tools that errored earlier or that the OS "
+                "does not support (e.g. run_netscan and run_amcache on XP).\n"
                 "Output one Markdown report starting with '# Memory Forensics "
                 "Analysis Report' and the 10 sections from the system prompt, "
                 "then call save_report once. Every section cites a tool result "
