@@ -1,11 +1,8 @@
-"""
-Core agent setup - builds a Deep Agent backed by Ollama and the Volatility MCP server.
-"""
+"""Build the AutoMem agent around Ollama, DeepAgents, and the Volatility MCP server."""
 
 from __future__ import annotations
 
 import logging
-import hashlib
 import re
 import socket
 from pathlib import Path
@@ -59,10 +56,22 @@ Cached drill-down: query_plugin_rows(plugin, memory_dump, filter_field,
   filter_value_3, max_rows). Plugin short names accepted: pslist, psscan,
   pstree, psxview, cmdline, netscan, malfind, dlllist, handles, svcscan,
   amcache.
-Server / housekeeping: server_diagnostics, list_memory_dumps.
-Reporting helpers: hash_evidence (hash IOC strings), save_report (persist
-  the final Markdown report).
-Do not call any plugin not on this list — it does not exist.
+Server / housekeeping: server_diagnostics, list_memory_dumps,
+  list_cached_plugins (report which plugins already have cached results
+  for a dump - use this to avoid redundant runs).
+Reporting helper: save_report (persist the final Markdown report).
+Do not call any plugin not on this list - it does not exist.
+
+# Cache awareness (prevents redundant work after session reload)
+At the start of any analysis turn for a dump, your FIRST tool call should
+be `list_cached_plugins(memory_dump=<dump>)`. For every entry it lists in
+`cached_plugins`, use `query_plugin_rows` to drill in - do NOT call the
+matching `run_<plugin>` tool, even if the user prompt says "analyse" or
+"check everything". Only call `run_<plugin>` for entries in
+`not_cached_plugins` or when the user explicitly asks for a re-run.
+Skip `list_cached_plugins` only for trivial follow-ups that do not
+need plugin data (a question about a single PID you already named, a
+report-generation turn that uses prior evidence).
 
 # Core rules
 - Use the dump named in `[Selected dump: x]` unless the user names another.
@@ -78,54 +87,62 @@ Do not call any plugin not on this list — it does not exist.
   evidence genuinely needs it.
 
 # Identifying suspicious processes
-Use your judgement on the full picture — name, path, parent, command line,
+Use your judgement on the full picture - name, path, parent, command line,
 network activity, injected memory. Common red flags include processes running
 from user-writable paths (Temp, Public, AppData, Downloads), system-process
 names from non-system paths, unusual parents, names off-by-one from real
 binaries, hidden/unlinked processes (in psscan but not pslist), and unexpected
-network listeners or C2-style connections. These are signals, not a checklist —
+network listeners or C2-style connections. These are signals, not a checklist -
 weigh evidence together and report what the data actually shows.
 
 # OS identification
 Use `NTBuildLab` from `windows.info.Info` for the Windows version. The
 `Major/Minor` row is kernel metadata and is unreliable. Cite the exact
-NTBuildLab string as evidence.
+NTBuildLab string as evidence - paste the verbatim value (e.g.
+`7601.17514.amd64fre.win7sp1_rtm.101119-1850` or
+`2600.xpsp_sp2_rtm.040803-2158`). Never substitute placeholder digits like
+`7601.xxxx` or `Windows 7.1.0.xxxx` - reports with placeholder OS values
+are rejected at save time.
 
 # Plugin / OS compatibility
 Once you know the OS from NTBuildLab, do NOT call plugins it does not
 support. On Windows XP / Server 2003 (`2600.xpsp...`):
 - `run_netscan` is unsupported and errors out. Treat absent network data as a
   limitation, not evidence of cleanliness.
-- `run_amcache` finds no records (Amcache is Windows 7+, sparse on Win7,
-  reliable on Windows 8+). Don't run it on XP.
+- `run_amcache` is blocked at the server (the Amcache hive does not exist on
+  XP). Don't call it.
 - `run_svcscan` may report a `null` Binary/ImagePath for kernel-mode services;
   a missing path alone is not suspicious.
-On Windows 7+ these plugins are fine. Pick alternatives when blocked rather
-than retrying the same tool.
+Amcache reliably returns rows only on Windows 8 and later. On Windows 7
+(`7601.win7sp1...`) the Volatility3 plugin generally returns 0 rows because
+it parses Win8/Win10 registry keys (`Root\\InventoryApplicationFile`,
+`Root\\InventoryDriverBinary`, `Root\\Programs`, `Root\\File`). If you run it
+on Win7 and get an empty result, document the limitation rather than
+retrying.
 
 # Using run_amcache
-Amcache records every executable that ran on the host (Path, SHA1Hash,
-InstallDate, Company, etc.) and routinely returns hundreds to thousands of
-rows. Workflow:
+Amcache records every executable that ran on the host. The plugin returns
+these columns: `EntryType` (Driver/Program/File), `Path`, `Company`,
+`LastModifyTime`, `LastModifyTime2`, `InstallTime`, `CompileTime`, `SHA1`,
+`Service`, `ProductName`, `ProductVersion`. Workflow:
 1. Call `run_amcache` ONCE per dump. Read `statistics` (top_paths, top_names)
    and `sample_data`; never re-run to "see more rows".
 2. Drill in with `query_plugin_rows("amcache", dump, filter_field=..., filter_value=...)`
-   on Path (e.g. `AppData`, `Temp`, `Public`, `Downloads`), SHA1Hash, or
-   EntryType. Combine filters via filter_field_2 / filter_value_2 for narrow
-   matches.
-3. Amcache `SHA1Hash` values are real file hashes — list them as file hashes
+   on `Path` (e.g. `AppData`, `Temp`, `Public`, `Downloads`), `SHA1`, or
+   `EntryType` (`Driver`, `Program`, `File`). Combine filters via
+   `filter_field_2` / `filter_value_2` for narrow matches.
+3. Amcache `SHA1` values are real file hashes - list them as file hashes
    in the IOC table and flag them as suitable for VirusTotal lookup.
 
-# Evidence hashing
-Call `hash_evidence` on exact suspicious indicator strings (IPs, domains,
-paths, command lines) for IOC reporting. These are string hashes, NOT
-file-content hashes — only Amcache `SHA1Hash` values qualify as real file
-hashes for VirusTotal.
+# Evidence hashes
+Only Amcache `SHA1` values are real file hashes suitable for VirusTotal.
+List them directly in the IOC table. Indicator strings (IPs, domains, paths,
+command lines) go in the IOC table verbatim - do not hash them.
 
 # Answer format
 Finding: one or two sentences with PID/IP/path evidence.
 Evidence: plugin -> key values.
-Confidence: High / Medium / Low — one-line reason.
+Confidence: High / Medium / Low - one-line reason.
 Limitations: what wasn't checked.
 Next step: one best follow-up.
 
@@ -234,6 +251,21 @@ def _report_quality_error(content: str) -> str | None:
     if any(marker in lowered for marker in placeholder_markers):
         return "Report still contains template placeholders. Replace every placeholder with evidence or an explicit limitation before saving."
 
+    # Reject placeholder OS values. Reports need the exact NTBuildLab value
+    # from get_image_info, not a model-written stand-in.
+    os_placeholder_pattern = re.compile(
+        r"(?:windows\s+\d+(?:\.\d+){0,3}\.x{2,}"
+        r"|build[:\s]+\d+\.x{2,}"
+        r"|ntbuildlab[:\s]+\d+\.x{2,})",
+        re.IGNORECASE,
+    )
+    if os_placeholder_pattern.search(content):
+        return (
+            "Report contains placeholder OS values (e.g. 'Windows 7.1.0.xxxx' or "
+            "'Build: 7601.xxxx'). Paste the exact NTBuildLab string from get_image_info "
+            "instead of placeholder digits."
+        )
+
     planning_markers = (
         "i will now generate",
         "i will now compile",
@@ -242,7 +274,7 @@ def _report_quality_error(content: str) -> str | None:
     if any(marker in lowered for marker in planning_markers):
         return "Report content looks like planning text rather than the final report."
 
-    # Catch wrong OS identification: model misreads the Major/Minor row instead of NTBuildLab
+    # Catch reports that use the misleading Major/Minor row as the OS version.
     bad_os_patterns = (
         "os version: 15.2600",
         "windows 10/server era",
@@ -262,7 +294,7 @@ def _report_quality_error(content: str) -> str | None:
 def _report_os_warning(content: str) -> str | None:
     """Return a soft analyst warning when the OS section looks wrong, or None if OK.
 
-    Unlike _report_quality_error this does NOT block the save — the warning is
+    Unlike _report_quality_error this does NOT block the save - the warning is
     prepended to the report as an HTML comment so analysts can review it.
     """
     lowered = content.lower()
@@ -296,56 +328,6 @@ def _report_os_warning(content: str) -> str | None:
     )
 
 
-def _normalize_hash_inputs(indicators: list[str] | str) -> list[str]:
-    """Return a small ordered list of non-empty indicator strings."""
-    if isinstance(indicators, str):
-        values = [line.strip() for line in indicators.splitlines()]
-    else:
-        values = [str(value).strip() for value in indicators]
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if not value or value in seen:
-            continue
-        cleaned.append(value)
-        seen.add(value)
-        if len(cleaned) >= 20:
-            break
-    return cleaned
-
-
-@langchain_tool
-def hash_evidence(indicators: list[str] | str, context: str = "") -> dict[str, Any]:
-    """Hash exact suspicious evidence strings for IOC reporting.
-
-    This hashes the string value supplied to the tool. It does not hash file
-    contents unless the caller supplies an actual file hash or bytes-derived
-    value from another tool.
-    """
-    values = _normalize_hash_inputs(indicators)
-    rows = []
-    for value in values:
-        raw = value.encode("utf-8", errors="replace")
-        rows.append({
-            "value": value,
-            "md5": hashlib.md5(raw).hexdigest(),
-            "sha1": hashlib.sha1(raw).hexdigest(),
-            "sha256": hashlib.sha256(raw).hexdigest(),
-        })
-    return {
-        "context": context,
-        "hash_scope": "exact_indicator_string",
-        "warning": (
-            "These are hashes of the exact indicator strings, not file-content "
-            "hashes unless the input value was already derived from file bytes. "
-            "Use VirusTotal file lookup only for real file hashes or known "
-            "malware hashes."
-        ),
-        "count": len(rows),
-        "items": rows,
-    }
-
-
 @langchain_tool
 def save_report(content: str, memory_dump: str | None = None, filename: str | None = None) -> dict[str, str]:
     """Save a Markdown forensic report under the local reports directory."""
@@ -360,22 +342,16 @@ def save_report(content: str, memory_dump: str | None = None, filename: str | No
     now = format_local_timestamp()
     report_body = ensure_report_date(content)
 
-    # Soft OS warning — prepend as an HTML comment but don't block the save
+    # Add a visible analyst note for likely OS mistakes, but do not block saving.
     os_warning = _report_os_warning(content)
     if os_warning:
         logger.warning("OS identification warning in report: %s", os_warning)
         report_body = os_warning + "\n\n" + report_body
 
     timestamp = now.replace(":", "").replace("-", "").replace(" ", "_")
-    if filename:
-        # Always append timestamp so re-runs never overwrite a prior report.
-        # Strip any pre-existing timestamp suffix (digits/+/-) before appending
-        # so a model that re-passes the prior report name doesn't stack timestamps.
-        stem = re.sub(r"[_\s]\d{8}[_\s]\d{6}.*$", "", Path(filename).stem)
-        stem = stem or Path(filename).stem  # fallback if regex strips everything
-        report_name = f"{stem}_{timestamp}.md"
-    else:
-        report_name = f"{_safe_report_stem(memory_dump)}_report_{timestamp}.md"
+    # Keep report names predictable across save paths and sessions. Ignore the
+    # optional filename because models tend to invent inconsistent variants.
+    report_name = f"{_safe_report_stem(memory_dump)}_forensic_report_{timestamp}.md"
 
     report_path = REPORTS_DIR / report_name
     report_path.write_text(
@@ -483,7 +459,6 @@ async def create_forensics_agent(
     backend=None,
 ):
     """Build the forensics agent and return (graph, config, skill_files).
-
     Connects to MCP if tools aren't provided, warms up the model if it's
     not already loaded, and wires up the two specialist sub-agents.
     """
@@ -516,10 +491,9 @@ async def create_forensics_agent(
     if checkpointer is None or store is None or backend is None:
         checkpointer, store, backend = build_agent_resources()
 
-    # Hard guard for both sub-agents: if the parent agent forgets to inline
-    # the dump filename in the task description, calling any run_* tool with
-    # no `memory_dump` argument crashes the MCP server. We refuse to take a
-    # single tool action and bounce back to the parent instead.
+    # Guard both sub-agents against tasks that omit the dump filename. Without
+    # `memory_dump`, run_* calls fail at the MCP layer, so the sub-agent should
+    # bounce the task back instead of guessing.
     _DUMP_GUARD = (
         "MANDATORY FIRST CHECK before any tool call:\n"
         "Scan the task description for a memory dump filename (must end in "
@@ -579,21 +553,9 @@ async def create_forensics_agent(
         "tools": mcp_tools,
     }
 
-    all_tools = list(mcp_tools) + [hash_evidence, save_report]
+    all_tools = list(mcp_tools) + [save_report]
     middleware = []
     try:
-        # Compaction layers:
-        #   - Auto-trigger: `create_deep_agent` already installs a
-        #     SummarizationMiddleware in its default stack (see
-        #     deepagents/graph.py — `create_summarization_middleware`).
-        #     Adding our own would collide on class name and trip the
-        #     "duplicate middleware instances" guard in the langchain
-        #     agent factory.
-        #   - Manual tool: `SummarizationToolMiddleware` is a different
-        #     class, so it doesn't collide. We give it a private
-        #     SummarizationMiddleware instance (NOT registered as
-        #     middleware) purely so its `compact_conversation` tool uses
-        #     the same summary format the auto-trigger would produce.
         from deepagents.middleware.summarization import (
             SummarizationMiddleware,
             SummarizationToolMiddleware,

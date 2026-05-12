@@ -1,7 +1,8 @@
 """
-FastMCP server that wraps Volatility3 plugins as callable tools.
+FastMCP server that exposes Volatility3 plugins as callable forensic tools.
 
-Big outputs get automatically summarised so they don't blow up the LLM context.
+Large plugin results are summarized before they reach the local model, while
+the full parsed rows stay available through the cache for later drill-downs.
 """
 
 import json
@@ -18,7 +19,9 @@ from volatility_mcp_server.tools.runner import (
     SUPPORTED_DUMP_EXTENSIONS,
     VOL_CMD,
     compact_result_for_llm,
+    lookup_cached_ntbuildlab,
     query_rows_from_cache,
+    read_cached_volatility_result,
     resolve_dump_path,
     run_volatility,
 )
@@ -29,14 +32,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("volatility_mcp")
 
-# Generous budget: small local LLMs with 32K-128K context can comfortably
-# handle ~40K chars of structured tool output per call. Earlier 12K was too
-# aggressive and caused the model to give up with "limitations" replies.
+# Small local models with 32K-128K context can handle a moderate amount of
+# structured tool output. A lower 12K budget caused useful evidence to be
+# hidden behind generic "limitations" replies during demos.
 MAX_RESPONSE_CHARS = 60_000
 
 # Map plugin short names (the ones the LLM uses) to the full Volatility3
-# plugin path. Used by `query_plugin_rows` so the LLM never has to remember
-# the long names.
+# plugin path. Used by `query_plugin_rows` so the LLM never has to remember the long names.
 AVAILABLE_PLUGIN_NAMES = {
     "pslist": "windows.pslist.PsList",
     "psscan": "windows.psscan.PsScan",
@@ -55,7 +57,7 @@ AVAILABLE_PLUGIN_NAMES = {
 def parse_optional_pid(value):
     """Convert a PID arg into an int, or None if not provided.
 
-    Tolerates the common ways small LLMs mis-encode integers:
+    Accepts the common ways local models and MCP transports encode integers:
       * bare int                          -> 1168
       * str of int                        -> "1168"
       * str of float (Ollama does this)   -> "1168.0"
@@ -77,7 +79,7 @@ def parse_optional_pid(value):
         stripped = value.strip()
         if not stripped:
             return None
-        # Accept "1234" and "1234.0" alike — some Ollama models emit floats.
+        # Accept "1234" and "1234.0" alike; some Ollama models emit floats.
         try:
             return int(stripped)
         except ValueError:
@@ -125,7 +127,7 @@ def file_not_found_result(memory_dump: str) -> dict:
     return error_result("input", str(memory_dump), f"File not found: {memory_dump}")
 
 
-def parse_max_rows(value, *, default: int = 50, hard_cap: int = 1000) -> int:
+def parse_max_rows(value, *, default: int = 50, hard_cap: int = 200) -> int:
     """Parse and clamp the LLM-provided max_rows argument."""
     if value in (None, ""):
         return default
@@ -301,7 +303,7 @@ def format_result(plugin: str, dump: str, result: dict) -> dict:
     }
 
 
-# --- MCP Tools ---
+# MCP Tools
 
 
 async def run_plugin_with_progress(
@@ -323,6 +325,58 @@ async def run_plugin_with_progress(
         except AssertionError:
             logger.debug("Progress dependency was not bound; continuing without progress updates")
     return format_result(plugin, path, result)
+
+
+@mcp.tool()
+async def list_cached_plugins(memory_dump: str) -> dict:
+    """Report which Volatility plugins already have cached results for this dump.
+
+    Call this FIRST at the start of any analysis turn - especially when a
+    chat session is reloaded - so you don't re-run plugins whose results
+    are already on disk. For every plugin listed in `cached_plugins`, use
+    `query_plugin_rows(plugin=..., memory_dump=...)` to drill into the
+    existing data instead of calling the corresponding `run_<plugin>` tool.
+    Only call `run_<plugin>` for entries in `not_cached_plugins`.
+
+    Args:
+        memory_dump: Filename or full path to the dump file.
+
+    Returns:
+        dict with `dump`, `image_info_cached` (bool), `cached_plugins`
+        (list of {plugin, row_count}), and `not_cached_plugins` (list of
+        short plugin names).
+    """
+    path = resolve_dump_path(memory_dump)
+    if not path.is_file():
+        return file_not_found_result(memory_dump)
+
+    cached: list[dict] = []
+    not_cached: list[str] = []
+    for short_name, plugin_path in AVAILABLE_PLUGIN_NAMES.items():
+        args = ["-f", str(path), plugin_path]
+        result = read_cached_volatility_result(args)
+        if result is not None and result.get("success"):
+            cached.append({
+                "plugin": short_name,
+                "row_count": int(result.get("row_count", 0) or 0),
+            })
+        else:
+            not_cached.append(short_name)
+
+    info_args = ["-f", str(path), "windows.info.Info"]
+    info_cached = read_cached_volatility_result(info_args) is not None
+
+    return {
+        "dump": str(path),
+        "image_info_cached": info_cached,
+        "cached_plugins": cached,
+        "not_cached_plugins": not_cached,
+        "guidance": (
+            "For any entry in cached_plugins, call query_plugin_rows instead "
+            "of run_<plugin>. Only run plugins from not_cached_plugins when "
+            "fresh evidence is genuinely needed."
+        ),
+    }
 
 
 @mcp.tool()
@@ -384,7 +438,8 @@ async def query_plugin_rows(
         query_plugin_rows("netscan", "sample.raw", "ForeignPort", "443")
         query_plugin_rows("handles", "sample.raw", "PID", "1168", max_rows=100)
         query_plugin_rows("amcache", "sample.raw", "Path", "AppData")
-        query_plugin_rows("amcache", "sample.raw", "SHA1Hash", "<sha1>")
+        query_plugin_rows("amcache", "sample.raw", "SHA1", "<sha1>")
+        query_plugin_rows("amcache", "sample.raw", "EntryType", "Program")
     """
     plugin_key = (plugin or "").strip().lower()
     if plugin_key not in AVAILABLE_PLUGIN_NAMES:
@@ -619,21 +674,49 @@ async def run_psxview(
 async def run_amcache(memory_dump: str, progress: Progress = Progress()) -> dict:
     """Pull Amcache execution evidence (program-run records) from the registry.
 
-    Amcache (Windows 7+, full coverage on Windows 8+) records every executable
-    that was launched, with its full path, SHA1 hash, install date, and
-    publisher metadata. Output is normally large — hundreds to thousands of
-    rows — so the response is a statistics + sample preview. Use
-    `query_plugin_rows("amcache", ...)` to filter on Path, SHA1Hash,
-    EntryType, or Company. The returned SHA1 values are real file hashes
-    suitable for VirusTotal lookups, unlike indicator-string hashes.
+    Wraps Volatility3's `windows.registry.amcache.Amcache` plugin. It parses
+    the Win8/Win10 keys `Root\\InventoryApplicationFile`,
+    `Root\\InventoryDriverBinary`, `Root\\Programs`, and `Root\\File`, so:
+      - Windows 10/2016+: full coverage (programs, files, drivers).
+      - Windows 8/2012:   programs and files (no driver inventory).
+      - Windows 7:        usually returns 0 rows (keys not populated).
+      - Windows XP/2003:  hive does not exist - blocked at this server.
+
+    Output is a TreeGrid with columns:
+      EntryType (Driver/Program/File), Path, Company, LastModifyTime,
+      LastModifyTime2, InstallTime, CompileTime, SHA1, Service, ProductName,
+      ProductVersion.
+
+    Output can be large (hundreds-thousands of rows on Win10), so the
+    response is a statistics + sample preview. Use
+    `query_plugin_rows("amcache", ...)` to filter on `Path`, `SHA1`,
+    `EntryType`, or `Company`. The returned `SHA1` values are real file
+    hashes suitable for VirusTotal lookups.
 
     Args:
         memory_dump: Filename or full path to the dump file.
     """
+    path = resolve_dump_path(memory_dump)
+    if not path.is_file():
+        return file_not_found_result(memory_dump)
+    build_lab = lookup_cached_ntbuildlab(path)
+    if build_lab and (
+        "xpsp" in build_lab.lower()
+        or build_lab.lstrip().startswith("2600.")
+    ):
+        return error_result(
+            "windows.registry.amcache.Amcache",
+            str(path),
+            (
+                f"Amcache hive does not exist on Windows XP / Server 2003 "
+                f"(NTBuildLab={build_lab}). Skip this plugin and document it "
+                "as 'Evidence not collected (plugin unsupported on this OS)'."
+            ),
+        )
     return await run_progress_plugin("windows.registry.amcache.Amcache", memory_dump, progress)
 
 
-# --- Entrypoint ---
+# Entrypoint
 
 
 def run_server() -> None:

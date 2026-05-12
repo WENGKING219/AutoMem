@@ -15,9 +15,7 @@ RUN pip install --no-cache-dir \
     fastmcp==3.2.3 \
  && python -c "import Crypto.Cipher, volatility3, yara; print('vol3 deps ok')"
 
-# Some older Windows samples, including prolaco.vmem, need the official
-# Windows symbol pack. Relying only on on-demand symbol generation can produce
-# incomplete tables and fail with missing types such as _ETHREAD.
+# Some older Windows samples, including prolaco.vmem, need the official Windows symbol pack
 RUN python -c "from pathlib import Path; import urllib.request, zipfile; target = Path('/opt/volatility-symbols/windows.zip'); target.parent.mkdir(parents=True, exist_ok=True); urllib.request.urlretrieve('https://github.com/volatilityfoundation/volatility3-test-data/releases/download/v0.0.1/windows.zip', target); assert zipfile.is_zipfile(target), 'downloaded windows.zip is not a valid zip'; print(f'windows symbols installed: {target} ({target.stat().st_size} bytes)')"
 
 # Stage 2: small runtime image
@@ -60,5 +58,5 @@ ENV PYTHONUNBUFFERED=1
 RUN python -m compileall -q /app/volatility_mcp_server
 
 # Docker Compose now runs a normal HTTP MCP service at http://localhost:8000/mcp.
-# The Streamlit app connects to that URL directly; no docker exec stdio bridge is needed.
+# The Streamlit app connects to that URL directly, no docker exec stdio bridge is needed.
 CMD ["python", "-m", "volatility_mcp_server"]

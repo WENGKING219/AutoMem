@@ -1,16 +1,15 @@
 ﻿"""
-Streamlit chat UI for the Memory Forensics Agent.
+Streamlit chat UI for AutoMem.
 
-Chat flow (follows the official Streamlit conversational-app pattern):
-  1. Render message history from session state
-  2. Accept user input via a small form (or a quick-action button)
-  3. Stream the assistant response inline - no extra st.rerun()
-  4. Append the finished response to session state
+The page renders the saved conversation, accepts either a typed prompt or a
+quick action, streams the assistant response inline, and then persists the
+finished turn back into session history.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import html
 import json
 import logging
@@ -81,11 +80,11 @@ def build_quick_actions(dump_name: str) -> list[QuickAction]:
             label="Initial Triage",
             icon=":material/radar:",
             prompt=(
-                f"Triage {dump}. Run get_image_info and run_pslist first; add "
-                "run_pstree or run_psscan only if a process needs more context. "
+                f"Triage {dump}. Run get_image_info and run_pslist and run_pstree; add "
+                "run_psscan only if a process needs more context. "
                 "Cite NTBuildLab for the OS and call out suspicious processes "
                 "with evidence and confidence. Use query_plugin_rows to drill "
-                "into specific PIDs — never re-run a plugin to see more rows."
+                "into specific PIDs - never re-run a plugin to see more rows."
             ),
         ),
         QuickAction(
@@ -110,7 +109,7 @@ def build_quick_actions(dump_name: str) -> list[QuickAction]:
                 "query_plugin_rows(plugin=\"netscan\", ...) by ForeignPort, "
                 "ForeignAddr, or PID. Tie each suspicious endpoint back to a "
                 "process via run_pslist or run_cmdline. If netscan errors on "
-                "this OS (e.g. Windows XP), document it and stop — do not retry."
+                "this OS (e.g. Windows XP), document it and stop - do not retry."
             ),
         ),
         QuickAction(
@@ -121,12 +120,13 @@ def build_quick_actions(dump_name: str) -> list[QuickAction]:
                 "Run run_svcscan once and skim top_paths / top_names for "
                 "services with binaries outside System32/SysWOW64; drill in "
                 "with query_plugin_rows(plugin=\"svcscan\", ...). Then run "
-                "run_amcache once (Windows 7+ only — skip on XP) and read its "
-                "statistics; drill in with "
+                "run_amcache once (Windows 8+ only - Win7 usually returns 0 "
+                "rows, XP is blocked) and read its statistics; drill in with "
                 "query_plugin_rows(plugin=\"amcache\", filter_field=\"Path\", "
                 "filter_value=\"AppData\") (also Temp, Public, Downloads, "
                 "ProgramData) to flag executions from user-writable paths. "
-                "Capture amcache SHA1Hash values as file hashes for VirusTotal."
+                "List amcache SHA1 values directly in the IOC table as "
+                "file hashes for VirusTotal."
             ),
         ),
         QuickAction(
@@ -160,39 +160,105 @@ def tcp_endpoint_reachable(url: str, timeout: float = 0.5) -> bool:
         return False
 
 
+# Each session gets its own asyncio loop running on a dedicated daemon
+# thread. Streamlit's main script thread submits coroutines to that loop
+# via `asyncio.run_coroutine_threadsafe` and polls the resulting future.
+# Running the loop off-thread is what lets the Stop button actually
+# interrupt an in-flight LLM call: while the main thread is polling, it
+# can also peek at Streamlit's pending-rerun signal (set when the user
+# clicks Stop) and cancel the future - which propagates `CancelledError`
+# down through the agent into the Ollama HTTP request.
+_AGENT_LOOPS: dict[str, tuple[asyncio.AbstractEventLoop, threading.Thread]] = {}
+_AGENT_LOOPS_LOCK = threading.Lock()
+
+
+class TurnStoppedByUser(Exception):
+    """Raised by `run_async` when the user clicked Stop mid-turn.
+
+    The caller is expected to catch this, render a friendly "stopped"
+    message, and let the queued Streamlit rerun proceed.
+    """
+
+
+def _session_loop_key() -> str:
+    """Stable key for the current Streamlit session's worker loop."""
+    return st.session_state.get("thread_id") or "default"
+
+
 def get_session_event_loop() -> asyncio.AbstractEventLoop:
-    """Return a per-session event loop for async agent work."""
-    loop = st.session_state.get("event_loop")
-    if loop is None or loop.is_closed():
+    """Return a per-session asyncio loop running on a dedicated daemon thread."""
+    key = _session_loop_key()
+    with _AGENT_LOOPS_LOCK:
+        entry = _AGENT_LOOPS.get(key)
+        if entry is not None:
+            loop, thread = entry
+            if not loop.is_closed() and thread.is_alive():
+                return loop
         loop = asyncio.new_event_loop()
-        st.session_state.event_loop = loop
-    return loop
+        thread = threading.Thread(
+            target=loop.run_forever,
+            name=f"automem-loop-{key[:8]}",
+            daemon=True,
+        )
+        thread.start()
+        _AGENT_LOOPS[key] = (loop, thread)
+        return loop
+
+
+def _streamlit_rerun_pending() -> bool:
+    """Best-effort check: has the user clicked a button while we're blocking?"""
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        from streamlit.runtime.scriptrunner_utils.script_requests import (
+            ScriptRequestType,
+        )
+
+        ctx = get_script_run_ctx()
+        if ctx is None:
+            return False
+        state = getattr(ctx.script_requests, "_state", None)
+        return state in (ScriptRequestType.RERUN, ScriptRequestType.STOP)
+    except Exception:
+        return False
 
 
 def run_async(coro):
-    """Run an async coroutine on the session's persistent event loop."""
+    """Submit a coroutine to the session worker loop and poll responsively."""
     loop = get_session_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    finally:
-        asyncio.set_event_loop(None)
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    cancel_signalled = False
+    while True:
+        try:
+            return future.result(timeout=0.1)
+        except concurrent.futures.TimeoutError:
+            if cancel_signalled:
+                continue
+            stop_pending = _streamlit_rerun_pending()
+            if not stop_pending:
+                thread_id = st.session_state.get("thread_id")
+                if thread_id:
+                    event = _CANCEL_EVENTS.get(thread_id)
+                    if event is not None and event.is_set():
+                        stop_pending = True
+            if stop_pending:
+                cancel_signalled = True
+                thread_id = st.session_state.get("thread_id")
+                if thread_id:
+                    get_cancel_event(thread_id).set()
+                future.cancel()
+        except concurrent.futures.CancelledError:
+            raise TurnStoppedByUser() from None
 
 
-# â”€â”€ Cooperative cancellation â”€â”€
+# Cooperative cancellation
 #
-# Streamlit serialises script execution per session: while `run_until_complete`
-# is blocking the script's main thread, no widget callback (including the Stop
-# button) can run. That means relying on `st.session_state.cancel_requested`
-# inside the streaming loop is a no-op â€” the value the loop reads is whatever
-# was committed when the run started, and never changes mid-run.
+# The agent runs on a worker thread (see `run_async`), so this event gives the
+# streaming loop a cooperative place to stop between LangGraph steps. When
+# `run_async` detects a queued Stop-button rerun, it also cancels the future
+# directly so an in-flight Ollama HTTP call can be interrupted.
 #
-# To actually be able to halt a turn we keep a process-wide
-# `threading.Event` per `thread_id`. The streaming loop checks the event at
-# every yield (between agent steps) AND every few seconds against a hard
-# wall-clock turn budget. The Stop button still sets the event for the
-# documented "next yield" semantics; the wall-clock budget is the real
-# safety net against a stuck Ollama call.
+# A wall-clock budget on every step is the safety net against a hung
+# Ollama process that somehow swallows cancellation.
 _CANCEL_EVENTS: dict[str, threading.Event] = {}
 _CANCEL_EVENTS_LOCK = threading.Lock()
 
@@ -226,6 +292,7 @@ def reset_cancel(thread_id: str) -> None:
 TOOL_LABELS = {
     "server_diagnostics": "Running server diagnostics",
     "list_memory_dumps": "Listing available memory dumps",
+    "list_cached_plugins": "Checking which plugins are already cached",
     "query_plugin_rows": "Filtering cached plugin results",
     "get_image_info": "Reading OS profile and metadata",
     "run_pslist": "Listing running processes (pslist)",
@@ -239,7 +306,6 @@ TOOL_LABELS = {
     "run_svcscan": "Checking Windows services (svcscan)",
     "run_psxview": "Cross-checking hidden processes (psxview)",
     "run_amcache": "Reading Amcache execution evidence (amcache)",
-    "hash_evidence": "Hashing suspicious evidence values",
     "compact_conversation": "Compacting conversation context",
     "save_report": "Saving report to disk",
     "write_todos": "Updating investigation plan",
@@ -258,7 +324,7 @@ def format_elapsed(seconds: float) -> str:
     return f"{mins}m {secs}s"
 
 
-# â”€â”€ Page config + branding â”€â”€
+# Page config + branding
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 LOGO_PATH = ASSETS_DIR / "automem_logo.svg"
@@ -316,12 +382,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# â”€â”€ Session state defaults â”€â”€
+# Session state defaults
 
 def init_session():
     defaults = {
         "messages": [],
-        "event_loop": None,
         "agent": None,
         "agent_config": None,
         "agent_files": None,
@@ -379,7 +444,7 @@ def init_session():
 
 init_session()
 
-# Old sessions or env may still use removed presets (4Kâ€“16K); snap to a valid choice.
+# Old sessions or env may still use removed presets (4K-16K); snap to a valid choice.
 allowed_ctx = set(CTX_PRESETS.values())
 if st.session_state.num_ctx not in allowed_ctx:
     st.session_state.num_ctx = (
@@ -387,11 +452,10 @@ if st.session_state.num_ctx not in allowed_ctx:
     )
 
 
-# â”€â”€ Helpers â”€â”€
+# Helpers
 
 def fetch_ollama_models(base_url: str) -> list[dict]:
-    """Ask Ollama which models have been pulled â€” uses plain urllib
-    so it works without touching the async event loop on first load."""
+    """Ask Ollama which models have been pulled without touching the async loop."""
     import urllib.request
     models: list[dict] = []
     try:
@@ -453,7 +517,7 @@ def delete_report_file(report_path: Path) -> bool:
 
 
 def reports_dir_signature() -> tuple[int, int]:
-    """Count + newest mtime of reports/*.md â€” detects new saves during the same run."""
+    """Count + newest mtime of reports/*.md - detects new saves during the same run."""
     paths = get_available_reports()
     if not paths:
         return (0, 0)
@@ -660,7 +724,7 @@ def trim_replayed_assistant_prefix(text: str, existing_messages: list[dict]) -> 
     """Drop assistant text replayed from previous turns by the graph.
 
     Only strips a prior reply if it is meaningfully long (>=120 chars) and
-    matches the start of the new reply EXACTLY â€” short prefix matches such
+    matches the start of the new reply EXACTLY - short prefix matches such
     as a shared "# Memory Forensics Analysis Report" heading must not be
     stripped, or we silently truncate legitimate new content. We also stop
     at the first match (don't iterate-strip) and only consider the most
@@ -693,7 +757,7 @@ def trim_replayed_assistant_prefix(text: str, existing_messages: list[dict]) -> 
     return cleaned
 
 
-# â”€â”€ Agent initialization â”€â”€
+# Agent initialization
 
 def stream_text_chunks(text: str):
     """Yield a response in small line-based chunks for st.write_stream."""
@@ -985,9 +1049,9 @@ async def initialize_agent(status_ui=None):
             return False
         loaded = ollama_status.get("models_loaded", [])
         if loaded:
-            log(f"Ollama online â€” **{loaded[0]['name']}** ({loaded[0]['size_gb']} GB)")
+            log(f"Ollama online - **{loaded[0]['name']}** ({loaded[0]['size_gb']} GB)")
         else:
-            log("Ollama online â€” no model cached yet, will load on first request.")
+            log("Ollama online - no model cached yet, will load on first request.")
 
         if status_ui:
             status_ui.update(label="Connecting to MCP server...")
@@ -995,13 +1059,13 @@ async def initialize_agent(status_ui=None):
         mcp_tools = await get_mcp_tools()
         st.session_state.mcp_connected = True
         mcp_was_connected = True
-        log(f"MCP connected â€” **{len(mcp_tools)} tools** available.")
+        log(f"MCP connected - **{len(mcp_tools)} tools** available.")
 
         checkpointer, store, backend = build_agent_resources()
         ctx_size = st.session_state.num_ctx
         if status_ui:
             status_ui.update(label=f"Building agent (ctx={ctx_size})...")
-        log(f"Creating agent â€” context={ctx_size} tokens...")
+        log(f"Creating agent - context={ctx_size} tokens...")
         agent, config, files = await create_forensics_agent(
             mcp_tools=mcp_tools,
             thread_id=st.session_state.thread_id,
@@ -1053,7 +1117,7 @@ async def initialize_agent(status_ui=None):
         return False
 
 
-# â”€â”€ Core chat: stream the agent's reply â”€â”€
+# Core chat: stream the agent's reply
 
 async def _consume_agent_stream(
     agent,
@@ -1099,8 +1163,7 @@ async def _consume_agent_stream(
             status_container.update(label=f"{label}  ({format_elapsed(elapsed)})")
 
     async def tick_timer():
-        # Refreshes the status label every second so the elapsed counter keeps
-        # ticking while the agent is mid-LLM-generation (between tool events).
+        # Keep elapsed time moving while the agent is generating between tool events.
         try:
             while True:
                 await asyncio.sleep(1.0)
@@ -1111,7 +1174,7 @@ async def _consume_agent_stream(
                             label=f"{current_label[0]}  ({format_elapsed(elapsed)})"
                         )
                     except Exception:
-                        # Streamlit container went away (rerun, stop) â€” exit quietly.
+                        # Streamlit container went away (rerun, stop) - exit quietly.
                         return
         except asyncio.CancelledError:
             return
@@ -1120,11 +1183,8 @@ async def _consume_agent_stream(
 
     try:
         async for event in stream_agent(agent, prompt, config, files):
-            # Cooperative cancellation: a module-level threading.Event is set
-            # by the Stop button (visible across reruns) OR by exceeding the
-            # wall-clock budget below. Checked between agent steps â€” finer
-            # cancellation requires running the agent in a worker thread,
-            # which is out of scope for this build.
+            # Cooperative cancellation is checked between agent steps. The
+            # worker-thread future handles cancellation inside active LLM calls.
             if cancel_event is not None and cancel_event.is_set():
                 log_status("Stop requested - finishing current step then halting.")
                 break
@@ -1194,9 +1254,9 @@ async def _consume_agent_stream(
                                 if "pid" in call_args:
                                     brief += f" (PID {call_args['pid']})"
                                 if brief:
-                                    log_status(f"**Step {step_count}** â€” {friendly} `{brief.strip()}`")
+                                    log_status(f"**Step {step_count}** - {friendly} `{brief.strip()}`")
                                 else:
-                                    log_status(f"**Step {step_count}** â€” {friendly}")
+                                    log_status(f"**Step {step_count}** - {friendly}")
 
                     elif kind == "ToolMessage":
                         content = msg.content if isinstance(msg.content, str) else str(msg.content)
@@ -1215,10 +1275,10 @@ async def _consume_agent_stream(
                             if isinstance(parsed, dict):
                                 rows = parsed.get("row_count")
                                 if rows is not None:
-                                    row_hint = f" â€” {rows} rows"
+                                    row_hint = f" - {rows} rows"
                         except (json.JSONDecodeError, TypeError):
                             pass
-                        log_status(f"  â†³ {tool_name} returned{row_hint}")
+                        log_status(f"  -> {tool_name} returned{row_hint}")
                         update_label("Thinking...")
 
                         if tool_name == "write_todos":
@@ -1260,7 +1320,7 @@ async def send_message(
 ) -> tuple[dict, float, list]:
     """Send user_input to the agent, stream events, return (response_data, elapsed, todos).
 
-    Does NOT touch st.session_state.messages â€” the caller handles that.
+    Does NOT touch st.session_state.messages - the caller handles that.
     """
     from agent.agent import answer_general_question
 
@@ -1384,7 +1444,7 @@ async def send_message(
         _response_still_needs_retry(cleaned, result["tool_calls"], is_report)
         and not skip_retry_for_tool_error
     ):
-        _dump_ctx = (
+        dump_context = (
             f"Memory dump under analysis: {st.session_state.current_dump}.\n"
             if st.session_state.current_dump else ""
         )
@@ -1392,7 +1452,7 @@ async def send_message(
             log_status("Report reply was incomplete. Retrying once with stricter report instructions...")
             update_label("Retrying report...")
             retry_prompt = (
-                f"{_dump_ctx}"
+                f"{dump_context}"
                 "STOP. Do NOT call any tools. Do NOT invoke any Volatility plugin or MCP tool.\n"
                 "\n"
                 "The previous response was an incomplete interim summary (Finding:/Evidence:/"
@@ -1403,31 +1463,31 @@ async def send_message(
                 "evidence already collected. Start with the report title, then write all "
                 "ten sections. Do NOT add any preamble, planning notes, or tool calls.\n"
                 "\n"
-                "OS IDENTIFICATION â€” trust NTBuildLab only:\n"
-                "  rs4_release / 17133  â†’ Windows 10 RS4 (April 2018 Update, v1803)\n"
-                "  rs5_release / 17763  â†’ Windows 10 RS5 (October 2018 Update, v1809)\n"
-                "  7601.win7sp1         â†’ Windows 7 SP1\n"
-                "  2600.xpsp            â†’ Windows XP\n"
-                "IGNORE the Major/Minor row â€” it shows kernel PE version, not Windows version.\n"
+                "OS IDENTIFICATION - trust NTBuildLab only:\n"
+                "  rs4_release / 17133  -> Windows 10 RS4 (April 2018 Update, v1803)\n"
+                "  rs5_release / 17763  -> Windows 10 RS5 (October 2018 Update, v1809)\n"
+                "  7601.win7sp1         -> Windows 7 SP1\n"
+                "  2600.xpsp            -> Windows XP\n"
+                "IGNORE the Major/Minor row - it shows kernel PE version, not Windows version.\n"
                 "\n"
                 "## Required report sections:\n"
-                "1. Executive Summary â€” verdict: Compromised / Suspicious / Clean + confidence\n"
-                "2. System Profile â€” OS (from NTBuildLab), architecture, capture time\n"
-                "3. Process Analysis â€” table: PID | Name | PPID | Anomaly | Confidence\n"
-                "4. Network Analysis â€” table: ForeignAddr | Port | State | PID | Process\n"
-                "5. Persistence â€” service findings from svcscan with actual binary paths\n"
-                "6. Injection / Code â€” malfind hits if run; Confirmed/FP per hit\n"
-                "7. IOC Table â€” Type | Value | Confidence | Context\n"
-                "8. Evidence Hashes / VirusTotal Lookup Notes â€” include already "
-                "collected hash_evidence output if present, otherwise state "
+                "1. Executive Summary - verdict: Compromised / Suspicious / Clean + confidence\n"
+                "2. System Profile - OS (from NTBuildLab), architecture, capture time\n"
+                "3. Process Analysis - table: PID | Name | PPID | Anomaly | Confidence\n"
+                "4. Network Analysis - table: ForeignAddr | Port | State | PID | Process\n"
+                "5. Persistence - service findings from svcscan with actual binary paths\n"
+                "6. Injection / Code - malfind hits if run; Confirmed/FP per hit\n"
+                "7. IOC Table - Type | Value | Confidence | Context\n"
+                "8. Evidence Hashes / VirusTotal Lookup Notes - list amcache "
+                "SHA1 values already collected, otherwise state "
                 "'No suspicious evidence hashes were generated in this pass.'\n"
-                "9. Recommendations â€” specific next steps\n"
-                "10. Limitations â€” what was not checked in this pass\n"
+                "9. Recommendations - specific next steps\n"
+                "10. Limitations - what was not checked in this pass\n"
                 "\n"
                 "Rules:\n"
                 "- Use ONLY evidence from tool results already in this conversation.\n"
                 "- Every section must cite actual tool output, or state "
-                "'Evidence not collected in this pass.' â€” no placeholders.\n"
+                "'Evidence not collected in this pass.' - no placeholders.\n"
                 "- Do NOT write Finding:/Evidence:/Confidence:/Next step: sections.\n"
                 "- After writing all sections, call save_report with the complete report.\n"
             )
@@ -1436,7 +1496,7 @@ async def send_message(
             log_status("Model reply was too generic. Retrying once with final-answer instructions...")
             update_label("Retrying answer...")
             retry_prompt = (
-                f"{_dump_ctx}"
+                f"{dump_context}"
                 "Using the evidence already collected in this thread, answer the user's question directly now.\n"
                 "Do not continue planning and do not stop at todos.\n"
                 "Give final findings, confidence, and limitations in plain Markdown.\n"
@@ -1464,7 +1524,7 @@ async def send_message(
                     if not _response_still_needs_retry(candidate, retry["tool_calls"], is_report):
                         logger.info(
                             "Retry text had no report shape but save_report succeeded "
-                            "(content len=%d) â€” using save_report content as display",
+                            "(content len=%d) - using save_report content as display",
                             len(candidate),
                         )
                         retry_cleaned = candidate
@@ -1537,7 +1597,7 @@ def auto_save_report(dump_name: str, content: str) -> str | None:
     stem = Path(dump_name).stem if dump_name else "analysis"
     now = datetime.now().astimezone()
     timestamp = now.strftime("%Y%m%d_%H%M%S%z")
-    filename = f"{stem}_report_{timestamp}.md"
+    filename = f"{stem}_forensic_report_{timestamp}.md"
     normalized_content = ensure_report_date(content, now=now)
     (REPORTS_DIR / filename).write_text(
         build_report_header_comment(now) + normalized_content,
@@ -1546,7 +1606,7 @@ def auto_save_report(dump_name: str, content: str) -> str | None:
     return filename
 
 
-# â”€â”€ Rendering helpers â”€â”€
+# Rendering helpers
 
 def render_message(msg: dict, message_index: int | str):
     """Display a single chat message (user or assistant) with all its extras."""
@@ -1600,7 +1660,7 @@ def render_tool_calls(
         for tc in tool_calls:
             if tc.get("type") == "call":
                 step = tc.get("step", "")
-                prefix = f"Step {step} â€” " if step else ""
+                prefix = f"Step {step} - " if step else ""
                 friendly = friendly_tool_name(tc["name"])
                 args_str = json.dumps(tc.get("args", {}), default=str)
                 if len(args_str) > 120:
@@ -1617,7 +1677,7 @@ def render_tool_calls(
                 if len(result_text) > 300:
                     snippet += "..."
                 st.markdown(
-                    f'<div class="tool-result">â†³ <b>{tc["name"]}</b>: {snippet}</div>',
+                    f'<div class="tool-result">-> <b>{tc["name"]}</b>: {snippet}</div>',
                     unsafe_allow_html=True,
                 )
 
@@ -1635,16 +1695,14 @@ def render_todos(todos: list):
             "in_progress": "todo-progress",
             "completed": "todo-done",
         }.get(status, "todo-pending")
-        icon = {"pending": "â³", "in_progress": "ðŸ”„", "completed": "âœ…"}.get(status, "â³")
+        icon = {"pending": "Pending", "in_progress": "Running", "completed": "Done"}.get(status, "Pending")
         st.markdown(
             f'<div class="todo-item {css_class}">{icon} {escaped_content}</div>',
             unsafe_allow_html=True,
         )
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-#  SIDEBAR
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# SIDEBAR
 
 with st.sidebar:
     st.title("AutoMem")
@@ -1674,8 +1732,7 @@ with st.sidebar:
     )
 
     # Fetch the model list once per URL. When Ollama is offline, repeated
-    # 5-second fetch attempts on every rerun make the UI feel frozen; the
-    # Refresh button below explicitly retries.
+    # 5-second fetch attempts on every rerun make the UI feel frozen
     url_changed = st.session_state.models_fetched_url != st.session_state.ollama_url
     should_fetch_models = url_changed or st.session_state.models_fetched_url is None
     if should_fetch_models:
@@ -1709,7 +1766,7 @@ with st.sidebar:
     else:
         st.session_state.model_name = st.text_input(
             "Model", value=st.session_state.model_name,
-            help="No models detected â€” type a model name manually, or check Ollama is running.",
+            help="No models detected - type a model name manually, or check Ollama is running.",
             disabled=busy,
         )
         if st.button("Refresh models", use_container_width=True, key="refresh_models_fallback", disabled=busy):
@@ -1717,9 +1774,10 @@ with st.sidebar:
             st.session_state.models_fetched_url = None
             st.rerun()
 
-    # Warn the user if they changed any setting after the agent was built.
+    # Warn the user if they changed any setting after the agent was built 
+    # as they need to click Initialize Agent to apply changes.
     if agent_config_changed():
-        st.warning("Configuration changed â€” click **Initialize Agent** to apply.")
+        st.warning("Configuration changed - click **Initialize Agent** to apply.")
 
     preset_names = list(CTX_PRESETS.keys())
     current_ctx = st.session_state.num_ctx
@@ -1886,9 +1944,7 @@ with st.sidebar:
     render_chat_history_sidebar(busy)
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-#  REPORT VIEWER (takes over the main area when active)
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# REPORT VIEWER (takes over the main area when active)
 
 if st.session_state.view_report:
     report_path = Path(st.session_state.view_report)
@@ -1911,9 +1967,7 @@ if st.session_state.view_report:
         st.stop()
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-#  MAIN CHAT AREA
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# MAIN CHAT AREA
 
 def render_chat_area():
     header_left, header_right = st.columns([5, 1], vertical_alignment="center")
@@ -2026,7 +2080,7 @@ def render_chat_area():
                 st.warning(
                     "Stop requested. The turn will halt at the next step "
                     "boundary (Stop cannot interrupt an in-flight LLM token "
-                    "stream â€” Streamlit blocks widget callbacks while the "
+                    "stream - Streamlit blocks widget callbacks while the "
                     f"script is busy). Hard timeout: {TURN_HARD_TIMEOUT_SEC}s.",
                     icon=":material/hourglass_empty:",
                 )
@@ -2156,17 +2210,17 @@ def render_chat_area():
                         response_data["content"] = streamed_text
 
                 tools_used = response_data.get("tool_calls")
-                _turn_key = f"turn_{len(st.session_state.get('messages', []))}"
+                turn_key = f"turn_{len(st.session_state.get('messages', []))}"
                 if tools_used:
                     render_tool_calls(
                         tools_used,
-                        key=f"{_turn_key}_tools",
+                        key=f"{turn_key}_tools",
                         default_expanded=False,
                     )
                 if response_data.get("reasoning"):
                     render_reasoning(
                         response_data["reasoning"],
-                        key=f"{_turn_key}_reasoning",
+                        key=f"{turn_key}_reasoning",
                         default_expanded=False,
                     )
                 if response_data.get("elapsed_sec") is not None:
@@ -2206,6 +2260,23 @@ def render_chat_area():
                     st.session_state.todos = todos
                 save_current_chat_history()
                 turn_finished_ok = True
+        except TurnStoppedByUser:
+            # User clicked Stop while the agent was working. Render a
+            # short transcript marker and keep the user prompt so they
+            # can edit-and-resend if they want.
+            stop_marker = {
+                "role": "assistant",
+                "content": "_Turn stopped by user before the agent could finish._",
+                "tool_calls": [],
+                "reasoning": "",
+                "trace": {"stopped_by_user": True},
+            }
+            st.session_state.messages.append(stop_marker)
+            save_current_chat_history()
+            try:
+                status_box.update(label="Stopped by user", state="error", expanded=False)
+            except Exception:
+                pass
         except BaseException:
             if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
                 st.session_state.messages.pop()

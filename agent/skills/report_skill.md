@@ -6,9 +6,9 @@ Use this when the user asks for a formal report. Follow the template exactly.
 
 Plugin sources allowed in the Source columns: `get_image_info`, `pslist`,
 `psscan`, `pstree`, `psxview`, `cmdline`, `netscan`, `malfind`, `dlllist`,
-`handles`, `svcscan`, `amcache`. Reporting helpers: `hash_evidence`,
-`save_report`. Use `query_plugin_rows` for drill-downs; cite the underlying
-plugin name in the Source column, not `query_plugin_rows`.
+`handles`, `svcscan`, `amcache`. Reporting helper: `save_report`. Use
+`query_plugin_rows` for drill-downs; cite the underlying plugin name in
+the Source column, not `query_plugin_rows`.
 
 ## Hard rules
 
@@ -17,13 +17,12 @@ plugin name in the Source column, not `query_plugin_rows`.
 3. Use the exact local analysis time injected by the harness. Do not guess the date.
 4. Confidence values must be High, Medium, or Low.
 5. Keep normal report generation within 8 Volatility tool calls before `save_report`. In long sessions where evidence is already collected, target 0-4 new calls.
-6. If suspicious evidence exists, call `hash_evidence` on the exact suspicious indicator strings (paths, commands, IPs, service names) and include its output. Amcache `SHA1Hash` values are real file hashes — do not pass them through `hash_evidence`; list them directly.
-7. Clearly label hash types:
-   - file hash: a real SHA1 from `amcache`, or another value derived from file bytes
-   - indicator-string hash: hash of a path, command, IP, service name, or other exact text indicator
-8. VirusTotal file lookups are appropriate for real file hashes (e.g. amcache SHA1). Do not present path-string hashes as file hashes.
-9. Write the full Markdown report first. Then call `save_report`.
-10. Skip plugins the OS does not support (e.g. `netscan`/`amcache` on XP). Document the gap as a limitation rather than retrying.
+6. Only Amcache `SHA1` values are real file hashes - list them directly in the IOC table and Section 8. Do NOT hash indicator strings (paths, commands, IPs, service names); list them verbatim.
+7. VirusTotal file lookups are appropriate only for real file hashes (e.g. amcache SHA1). If no real file hashes were collected, write "No suspicious evidence hashes were generated in this pass."
+8. Write the full Markdown report first. Then call `save_report`.
+9. Skip plugins the OS does not support (e.g. `netscan`/`amcache` on XP). Document the gap as a limitation rather than retrying.
+10. Before claiming a tool was "not run", search the conversation history. If a previous turn already executed the tool, cite that result instead of reporting it as missing.
+11. The IOC Summary Table is for indicators of compromise only. Do NOT include standard system processes (`lsass.exe`, `svchost.exe`, `services.exe`, etc.) unless they show concrete suspicious behavior (wrong path, wrong parent, anomalous network, injected memory). "Standard system process" is not an IOC.
 
 ## Filling discipline
 
@@ -84,7 +83,7 @@ plugin name in the Source column, not `query_plugin_rows`.
 
 Service entries from `svcscan`, plus notable executables seen in `amcache`
 (executions from user-writable paths, unfamiliar publishers, recent
-InstallDates). On Windows XP `amcache` is unavailable — write
+InstallDates). On Windows XP `amcache` is unavailable - write
 "Evidence not collected (plugin unsupported on this OS)" instead.
 
 | Mechanism | Detail | Confidence | Source |
@@ -104,8 +103,8 @@ InstallDates). On Windows XP `amcache` is unavailable — write
 ## 7. IOC Summary Table
 
 Use one row per indicator. Type can be `process`, `network`, `path`,
-`service`, `file_hash` (e.g. amcache SHA1), or `string_hash` (output of
-`hash_evidence`).
+`service`, or `file_hash` (e.g. amcache SHA1). Skip standard system
+processes unless they show concrete suspicious behavior.
 
 | Type | Value | Confidence | Context | Source |
 |---|---|---|---|---|
@@ -115,17 +114,17 @@ Use one row per indicator. Type can be `process`, `network`, `path`,
 
 ## 8. Evidence Hashes / VirusTotal Lookup Notes
 
-| Evidence Type | Original Value | MD5 | SHA1 | SHA256 | VirusTotal Use |
-|---|---|---|---|---|---|
-| {file_hash/indicator_string_hash} | {value} | {md5} | {sha1} | {sha256} | {yes_real_file_hash_or_no_indicator_string_only} |
+| Source File / Path | SHA1 | VirusTotal Use |
+|---|---|---|
+| {amcache_path} | {sha1_from_amcache} | yes |
 
 Notes:
-- Amcache `SHA1Hash` values come from file bytes — they are real file hashes
-  and are appropriate for VirusTotal lookups. Mark VirusTotal Use = `yes`.
-- `hash_evidence` outputs hash exact indicator strings (paths, commands,
-  IPs). Mark VirusTotal Use = `no, indicator string only`.
-- If nothing suspicious was found, write: "No suspicious evidence hashes
-  were generated in this pass."
+- Amcache `SHA1` values come from file bytes - they are real file hashes
+  and are appropriate for VirusTotal lookups. Note: Volatility3's amcache
+  plugin parses Win8/Win10 keys, so on Windows 7 the result is usually
+  empty and on XP the call is refused.
+- If no Amcache SHA1 hashes were collected, write: "No suspicious evidence
+  hashes were generated in this pass."
 
 ---
 
@@ -150,8 +149,10 @@ Notes:
 - Does the executive summary state the bottom line?
 - Does every suspicious row have evidence, confidence, and source?
 - Is OS identification based on NTBuildLab, not the Major/Minor row alone?
-- Did you call `hash_evidence` for suspicious values or state that no suspicious hashes were generated?
+- Did you list amcache SHA1 hashes (if any) or state that no suspicious file hashes were collected?
+- Are clean system processes (lsass.exe, svchost.exe, services.exe with no anomaly) excluded from the IOC table?
+- For every "X was not run" statement, did you check earlier turns to confirm it really was not run?
 - Are all placeholders removed?
 - Is the date the exact harness-provided local time?
 
-If all checks pass, call `save_report(filename="report_{stem}_{YYYYMMDD}.md", content="<the markdown above>")`.
+If all checks pass, call `save_report(memory_dump="<dump_name>", content="<the markdown above>")`. The harness picks the canonical filename automatically - do not pass `filename`.

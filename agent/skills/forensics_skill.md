@@ -15,9 +15,12 @@ Cached drill-down: `query_plugin_rows` (plugin short names: pslist,
 psscan, pstree, psxview, cmdline, netscan, malfind, dlllist, handles,
 svcscan, amcache).
 
-Reporting helpers: `hash_evidence` for IOC string hashes, `save_report`
-to persist the final Markdown. Server/housekeeping: `server_diagnostics`,
-`list_memory_dumps`. Anything else is not available — do not call it.
+Reporting helper: `save_report` to persist the final Markdown.
+Server/housekeeping: `server_diagnostics`, `list_memory_dumps`,
+`list_cached_plugins` (call first when starting work on a dump - especially
+after a session reload - to learn which plugins already have cached results
+so you can `query_plugin_rows` instead of re-running them).
+Anything else is not available - do not call it.
 
 ## Reading tool output (do this every time)
 
@@ -52,7 +55,7 @@ Every Volatility tool returns JSON shaped like:
 Always check `statistics` first. `top_names`, `top_paths`, `state_counts`,
 `top_foreign_*`, and `psxview_disagreement_rows` answer most questions
 without reading individual rows. The server does NOT pre-flag suspicious
-rows for you — form your own conclusions from the distributions and pull
+rows for you - form your own conclusions from the distributions and pull
 specific rows with `query_plugin_rows` when needed.
 
 ## Drilling in without re-running plugins
@@ -90,7 +93,7 @@ Rules:
 | "Network", "C2", "exfil"            | netscan            | query_plugin_rows by port/IP |
 | "Injection", "malware in memory"    | malfind            | dlllist + handles for the PID |
 | "Persistence"                       | svcscan            | cmdline for suspicious service PIDs |
-| "Execution evidence", "what ran"    | amcache            | query_plugin_rows on Path / SHA1Hash |
+| "Execution evidence", "what ran"    | amcache            | query_plugin_rows on Path / SHA1 / EntryType |
 
 ## Recipes
 
@@ -127,11 +130,19 @@ Rules:
 2. `run_cmdline`        -- search for `powershell -enc`, `mshta`, `regsvr32 /s /u`.
 3. Use `query_plugin_rows` on `svcscan` for suspicious service names or paths.
 
-### Recipe F -- Amcache execution evidence (Windows 7+ only)
-Amcache lists every executable that ran on the host with its full path,
-SHA1 file hash, and publisher metadata. It is normally large (hundreds to
-thousands of rows), so always read `statistics` first and drill in with
-`query_plugin_rows` rather than re-running the plugin.
+### Recipe F -- Amcache execution evidence (Windows 8+; Win7 returns empty)
+Amcache lists every executable that ran on the host. Volatility3's plugin
+parses Win8/Win10 registry keys (`Root\InventoryApplicationFile`,
+`Root\InventoryDriverBinary`, `Root\Programs`, `Root\File`), so:
+- Windows 10 / Server 2016+: full coverage (programs, files, drivers).
+- Windows 8 / Server 2012: programs, files (no driver inventory).
+- Windows 7: usually returns 0 rows - document as a limitation, do not retry.
+- Windows XP / Server 2003: Amcache hive does not exist; the MCP server
+  refuses the call.
+
+TreeGrid columns returned: `EntryType` (Driver/Program/File), `Path`,
+`Company`, `LastModifyTime`, `LastModifyTime2`, `InstallTime`,
+`CompileTime`, `SHA1`, `Service`, `ProductName`, `ProductVersion`.
 
 1. `run_amcache(memory_dump=dump)` -- one call only. Read `statistics`
    (top_paths, top_names) and `sample_data` to spot outliers.
@@ -139,22 +150,26 @@ thousands of rows), so always read `statistics` first and drill in with
    `query_plugin_rows(plugin="amcache", memory_dump=dump, filter_field="Path", filter_value="AppData", max_rows=100)`
    -- repeat for `Temp`, `Public`, `Downloads`, `ProgramData`.
 3. Hash drill-in (combine with another filter when many matches):
-   `query_plugin_rows(plugin="amcache", memory_dump=dump, filter_field="SHA1Hash", filter_value="<sha1>")`
-4. The `SHA1Hash` column is a real file hash and is suitable for VirusTotal
-   lookups. Distinguish it from indicator-string hashes in the IOC table.
-5. If running on XP/2003 (`2600.xpsp...`), Amcache does not exist — skip and
-   document as "Evidence not collected (plugin unsupported on this OS)".
+   `query_plugin_rows(plugin="amcache", memory_dump=dump, filter_field="SHA1", filter_value="<sha1>")`
+4. EntryType drill-in (filter to programs only, etc.):
+   `query_plugin_rows(plugin="amcache", memory_dump=dump, filter_field="EntryType", filter_value="Program")`
+5. The `SHA1` column is a real file hash and is suitable for VirusTotal
+   lookups. List it directly in the IOC table.
 
 ## Plugin / OS compatibility (check NTBuildLab first)
 
 - `netscan` requires Windows 7 or newer. On XP (`2600.xpsp...`) it errors with
   "not supported for this memory image's Windows version". Treat absent network
   data as a limitation, not as evidence of cleanliness.
-- `amcache` requires Windows 7+ (sparse on Win7, full coverage on Win8+).
-  Skip on XP-era dumps. Output is large, so use `query_plugin_rows` filters
-  on Path / SHA1Hash / EntryType — never re-run the plugin to "see more rows".
+- `amcache` reliably returns rows only on Windows 8+ - the Volatility3
+  plugin parses Win8/Win10 keys (`Root\InventoryApplicationFile`,
+  `Root\InventoryDriverBinary`, `Root\Programs`, `Root\File`). On Win7 it
+  generally returns 0 rows; on XP it is blocked at the MCP server because
+  the Amcache hive does not exist. Output can be large, so use
+  `query_plugin_rows` filters on `Path` / `SHA1` / `EntryType` - never
+  re-run the plugin to "see more rows".
 - `svcscan` runs on XP, but the `Binary`/`ImagePath` field is often `null` for
-  kernel-mode services. A missing path on its own is not suspicious — judge by
+  kernel-mode services. A missing path on its own is not suspicious - judge by
   the service name and state.
 - `malfind`, `pslist`, `psscan`, `pstree`, `psxview`, `cmdline`, `dlllist`,
   `handles`, `svcscan` work on every supported Windows version.
@@ -189,7 +204,7 @@ thousands of rows), so always read `statistics` first and drill in with
   `System32`/`SysWOW64`.
 - Recent `InstallDate` for an unfamiliar publisher right before the
   capture time.
-- A `SHA1Hash` you do not recognise — capture it for VirusTotal lookup.
+- A `SHA1` value you do not recognise - capture it for VirusTotal lookup.
 
 ## Honest reporting (every turn)
 

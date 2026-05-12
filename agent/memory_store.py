@@ -1,25 +1,13 @@
 """
-Persistent storage for LangGraph — SQLite-backed conversation checkpoints
-plus an in-memory key-value store for the agent's `/memories/` namespace.
+Persistent LangGraph storage for chat checkpoints and agent memories.
 
-Why SQLite (not MemorySaver):
-- The UI keeps the latest few chats in the sidebar. Each chat has its own
-  thread_id. With MemorySaver, switching chats showed the saved messages
-  in the UI but the LangGraph runtime had no checkpoint for the thread, so
-  the model lost all prior context and answered as if from scratch.
-- AsyncSqliteSaver persists checkpoints to disk keyed by thread_id, so
-  reopening a saved chat restores the agent's actual conversation memory.
+The UI can reopen recent chats, so each Streamlit thread needs a matching
+LangGraph checkpoint on disk. AsyncSqliteSaver gives us that persistence while
+still supporting the async streaming APIs used by the agent.
 
-Why async: the agent is driven by `astream`/`ainvoke`, and the sync
-SqliteSaver raises NotImplementedError on the async checkpoint methods
-LangGraph calls during streaming.
-
-Why this does not bloat the LLM context:
-- The model only ever sees the current thread's checkpoint. Other threads
-  in the DB are untouched. Within a single thread, the existing
-  summarization middleware in `agent.py` keeps message history bounded.
-- We additionally call `prune_threads(...)` from the UI whenever the
-  history list changes, so DB rows for evicted chats are deleted.
+Only the active thread is loaded into the model context. Older sidebar chats
+remain in SQLite until the UI prunes them, and summarization keeps each active
+thread bounded.
 """
 
 import asyncio
@@ -34,27 +22,16 @@ from config.settings import CHECKPOINT_DB_FILE
 
 logger = logging.getLogger("forensics_agent")
 
-# Module-level cache so every caller shares one checkpointer + connection.
-# Keyed implicitly by the running event loop: AsyncSqliteSaver creates an
-# asyncio.Lock bound to the loop that was running at construction time, and
-# its underlying aiosqlite worker thread is also tied to that loop. If the
-# loop changes (Streamlit script reruns can spin up a new per-session loop,
-# or hot-reload swaps the loop entirely) we MUST rebuild — reusing the old
-# saver raises "Lock is bound to a different event loop".
+# Module-level cache so callers share one checkpointer and SQLite connection.
+# The saver is tied to the event loop that created it, so Streamlit reruns and
+# hot reloads need a fresh saver when the loop changes.
 _checkpointer = None
 _checkpointer_loop = None
 _store = None
 
 
 async def _configure_async_pragmas(conn: aiosqlite.Connection) -> None:
-    """Set PRAGMAs on the async connection so concurrent readers don't fail.
-
-    `AsyncSqliteSaver.setup()` already enables WAL on first use, but it does
-    NOT set a `busy_timeout`. Without one, any sync writer (our prune path,
-    or another process opening the same file) racing the saver's first write
-    will get an immediate `OperationalError: database is locked` instead of
-    waiting. We pre-set both pragmas so the saver's setup is idempotent.
-    """
+    """Configure SQLite pragmas for better concurrency and reliability with async writes."""
     try:
         try:
             await conn  # awaiting the Connection completes its handshake
@@ -77,13 +54,7 @@ async def _close_async_conn_safely(conn: aiosqlite.Connection) -> None:
 
 
 def get_checkpointer():
-    """Return the shared SQLite-backed checkpointer (created on first use).
-
-    Must be called from within a running asyncio event loop. If the running
-    loop differs from the one the cached saver was built on, the saver is
-    discarded and rebuilt — its asyncio primitives can only be awaited from
-    their original loop.
-    """
+    """Return the shared AsyncSqliteSaver for `/checkpoints/`, creating it if needed."""
     global _checkpointer, _checkpointer_loop
 
     try:
@@ -96,10 +67,9 @@ def get_checkpointer():
         and loop is not None
         and _checkpointer_loop is not loop
     ):
-        # Loop changed under us — drop the stale saver. Try to close the old
-        # connection on its original loop (if still alive) so its sqlite
-        # handle and WAL files are released; on Windows leaving the handle
-        # to GC can hold a lock and break the next sync prune.
+        # The event loop changed, so drop the stale saver. Closing the old
+        # connection on its original loop releases SQLite handles promptly on
+        # Windows, where waiting for GC can leave the next sync prune locked.
         logger.info("Event loop changed; rebuilding AsyncSqliteSaver.")
         old_loop = _checkpointer_loop
         old_conn = getattr(_checkpointer, "conn", None)
@@ -120,10 +90,8 @@ def get_checkpointer():
         conn = aiosqlite.connect(str(CHECKPOINT_DB_FILE))
         _checkpointer = AsyncSqliteSaver(conn)
         _checkpointer_loop = loop
-        # Schedule pragma configuration on the running loop. We don't await
-        # here (this function is sync) — the task runs to completion before
-        # the caller's first checkpoint write because asyncio is cooperative
-        # and our caller will yield via `await create_forensics_agent(...)`.
+        # This function is sync, so schedule pragma setup on the running loop.
+        # The caller yields while building the agent before the first write.
         if loop is not None:
             loop.create_task(_configure_async_pragmas(conn))
     return _checkpointer
@@ -146,7 +114,7 @@ def prune_threads(keep_thread_ids):
     agent's async writes.
 
     Returns the number of threads deleted. Safe to call before the
-    checkpointer has any rows — returns 0 in that case.
+    checkpointer has any rows - returns 0 in that case.
     """
     keep = {tid for tid in keep_thread_ids if tid}
 
@@ -160,7 +128,7 @@ def prune_threads(keep_thread_ids):
             rows = conn.execute("SELECT DISTINCT thread_id FROM checkpoints").fetchall()
         except sqlite3.OperationalError as err:
             # Table not created yet, OR async writer holds the lock past our
-            # busy_timeout. Either way, prune is not urgent — skip and let
+            # busy_timeout. Either way, prune is not urgent - skip and let
             # the next call retry rather than crashing the UI.
             logger.debug("prune_threads: skipping (sqlite said %s)", err)
             return 0

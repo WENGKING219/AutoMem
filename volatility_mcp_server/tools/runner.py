@@ -1,6 +1,5 @@
 """
 Small, stable Volatility3 runner used by the MCP server.
-
 Design goals for the FYP demo:
 - one Volatility command path: quiet JSON renderer + persistent Volatility cache
 - one project result-cache format: parsed JSON rows, not huge escaped raw JSON
@@ -77,6 +76,10 @@ FIELD_ALIASES = {
     "localaddr": {"localaddr", "localaddress", "sourceaddr", "sourceaddress"},
     "localport": {"localport", "sourceport", "srcport"},
     "state": {"state", "status"},
+    # Amcache: actual TreeGrid column is `SHA1` (not `SHA1Hash`); keep the
+    # alias so prompts/agent calls referencing `SHA1Hash` still resolve.
+    "sha1": {"sha1", "sha1hash", "filehash", "hash"},
+    "entrytype": {"entrytype", "entry_type", "type"},
 }
 
 SUSPICIOUS_PORTS: set[int] = set()
@@ -157,6 +160,39 @@ def write_cache(key: str, data: str) -> None:
         except OSError:
             pass
         raise
+
+
+def lookup_cached_ntbuildlab(dump_path: Path) -> str | None:
+    """Return NTBuildLab from a cached `windows.info.Info` run, if available.
+
+    Used to short-circuit OS-incompatible plugin calls (e.g. amcache on XP)
+    after the agent has already run get_image_info. Returns None when no
+    cache entry exists, so callers can fall through and let the underlying
+    plugin run normally.
+    """
+    args = ["-f", str(dump_path), "windows.info.Info"]
+    cache_key = make_cache_key(args, use_json=True)
+    cached = read_cache(cache_key)
+    if cached is None:
+        return None
+    try:
+        entry = json.loads(cached)
+    except json.JSONDecodeError:
+        return None
+
+    rows = entry.get("rows")
+    if rows is None:
+        rows = coerce_row_list(entry.get("data"))
+    if not rows:
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = row.get("Variable") or row.get("variable") or row.get("Field")
+        value = row.get("Value") or row.get("value")
+        if isinstance(key, str) and key.strip().lower() == "ntbuildlab" and isinstance(value, str):
+            return value.strip()
+    return None
 
 
 def resolve_dump_path(name_or_path: str) -> Path:

@@ -91,7 +91,7 @@ DUMP_HINTS = (
     ".lime",
     ".img",
     "memory dump",
-    # Bare references the user makes when a dump is already selected — these
+    # Bare references the user makes when a dump is already selected - these
     # route to the tool-using agent even though no filename is in the text.
     "this dump",
     "the dump",
@@ -114,8 +114,8 @@ def should_bypass_tools(prompt: str, *, is_report: bool = False) -> bool:
       1. Report turns always go to the tool-using agent.
       2. Identity questions ("who are you", "what can you do", ...) always bypass.
       3. If the prompt names a dump file or contains a forensic action verb,
-         it goes to the tool-using agent — even if it starts with a help
-         prefix like "what is" — because the user is asking about real data.
+         it goes to the tool-using agent - even if it starts with a help
+         prefix like "what is" - because the user is asking about real data.
       4. Otherwise, if the prompt starts with a general-help prefix, it
          bypasses. This catches bare "help", "what is the workflow", and
          "explain pslist" without forcing the user to also mention a

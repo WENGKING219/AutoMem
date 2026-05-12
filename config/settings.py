@@ -1,15 +1,11 @@
-"""
-Central configuration for the Memory Forensics Agent.
-
-All tuneable knobs and file paths live here so they're easy to find.
-"""
+"""Central configuration for AutoMem paths, services, and model settings."""
 
 import os
 from pathlib import Path
 
 project_root = Path(__file__).resolve().parent.parent
 
-# Where things live on disk
+# Project directories
 MEMORY_DUMPS_DIR = project_root / "memory_dumps"
 REPORTS_DIR = project_root / "reports"
 LOGS_DIR = project_root / "logs"
@@ -27,10 +23,10 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
 # same set of flagged PIDs and IOCs.
 OLLAMA_TEMPERATURE = 0.2
 
-# Use a moderate default context window for better stability on normal laptops.
+# Keep the default context large enough for evidence, but stable on laptops.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 
-OLLAMA_KEEP_ALIVE = -1      # keep model in memory forever (avoids reload lag)
+OLLAMA_KEEP_ALIVE = -1      # keep the model loaded to avoid reload lag
 # Use a smaller reply budget for normal chat so the UI feels responsive.
 OLLAMA_FAST_NUM_PREDICT = int(
     os.getenv("OLLAMA_FAST_NUM_PREDICT", os.getenv("OLLAMA_NUM_PREDICT", "4096"))
@@ -39,7 +35,7 @@ OLLAMA_FAST_NUM_PREDICT = int(
 OLLAMA_DEEP_NUM_PREDICT = int(os.getenv("OLLAMA_DEEP_NUM_PREDICT", "12288"))
 OLLAMA_NUM_BATCH = int(os.getenv("OLLAMA_NUM_BATCH", "256"))
 
-# GPU offloading — -1 means "put all layers on GPU".
+# GPU offloading - -1 means "put all layers on GPU".
 # Lower this (e.g. 20) if you run out of VRAM.
 OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "-1"))
 
@@ -57,10 +53,10 @@ CTX_PRESETS = {
     "Large (64K)": 65536,
 }
 
-# Volatility MCP server endpoint exposed by docker-compose
+# Volatility MCP endpoint exposed by docker-compose
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000/mcp")
 # Kept for backwards-compatible diagnostics/messages. The app now connects over HTTP.
 MCP_DOCKER_CONTAINER = os.getenv("MCP_DOCKER_CONTAINER", "volatility-mcp")
 
-# Name tag for the LangGraph agent
+# LangGraph agent name tag
 AGENT_NAME = "memory-forensics-agent"

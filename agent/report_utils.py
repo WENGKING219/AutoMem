@@ -5,7 +5,17 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-DATE_LINE_PATTERN = re.compile(r"^\*\*Date\*\*:\s*.+$", re.MULTILINE)
+# Match any "Date" / "Date of Analysis" / "Date:" line the model may write,
+# whether the colon is inside or outside the bold markers.
+# Examples this catches:
+#   **Date**: 2026-05-08 10:58:10+08:00
+#   **Date:** 2026-05-08 10:58:10+08:00
+#   **Date of Analysis:** 2026-05-08 10:54:27+08:00
+#   **Date of Analysis**: 2026-05-08 ...
+DATE_LINE_PATTERN = re.compile(
+    r"^\*\*\s*Date(?:\s+of\s+Analysis)?\s*[:*]+\*?\*?\s*[^\n]*$",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 def current_local_time() -> datetime:
@@ -29,19 +39,28 @@ def build_report_header_comment(now: datetime | None = None) -> str:
 
 
 def ensure_report_date(content: str, now: datetime | None = None) -> str:
-    """Replace or insert the visible report date with the current local time."""
+    """Replace every Date/"Date of Analysis" line with one canonical date.
+
+    The model frequently writes its own ``**Date of Analysis:**`` line in
+    addition to the ``**Date**:`` line we insert. To avoid duplicate or
+    conflicting dates in saved reports, strip all such lines first and then
+    insert exactly one canonical ``**Date**:`` line.
+    """
     text = (content or "").strip()
     if not text:
         return text
 
-    date_line = f"**Date**: {format_local_timestamp(now)}"
-    if DATE_LINE_PATTERN.search(text):
-        return DATE_LINE_PATTERN.sub(date_line, text, count=1)
+    canonical_date = f"**Date**: {format_local_timestamp(now)}"
 
-    lines = text.splitlines()
+    # Strip ALL existing date-style lines the model may have written.
+    stripped = DATE_LINE_PATTERN.sub("", text)
+    # Collapse runs of blank lines created by the substitution.
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip()
+
+    lines = stripped.splitlines()
     if lines and lines[0].startswith("# "):
         lines.insert(1, "")
-        lines.insert(2, date_line)
+        lines.insert(2, canonical_date)
         return "\n".join(lines)
 
-    return f"{date_line}\n\n{text}"
+    return f"{canonical_date}\n\n{stripped}"

@@ -1,11 +1,8 @@
-# AutoMem - Streamlit theme.
-# Theming via config.toml is preferred over inline CSS because it applies
-# uniformly to all native widgets (buttons, badges, inputs, expanders).
-# Docs: https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+# AutoMem - Streamlit dark theme.
 
 [theme]
 base = "dark"
-primaryColor = "#7C5CFF"             # AutoMem violet (matches logo gradient)
+primaryColor = "#7C5CFF"           
 backgroundColor = "#0E1117"
 secondaryBackgroundColor = "#161B22"
 textColor = "#E6E9EF"
